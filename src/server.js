@@ -1,0 +1,100 @@
+import Fastify from 'fastify';
+import sensible from '@fastify/sensible';
+import cors from '@fastify/cors';
+import multipart from '@fastify/multipart';
+import { authenticate } from './auth/middleware.js';
+import { requireAdmin } from './auth/roles.js';
+import { authRoutes } from './routes/auth.js';
+import { healthRoutes } from './routes/health.js';
+import { generateRoutes } from './routes/generate.js';
+import { keysRoutes } from './routes/keys.js';
+import { modelsRoutes } from './routes/models.js';
+import { streamRoutes } from './routes/stream.js';
+import { analyticsRoutes } from './routes/analytics.js';
+import { batchRoutes } from './routes/batch.js';
+import { queueRoutes } from './routes/queue.js';
+import { metricsRoutes } from './routes/metrics.js';
+import { debugRoutes } from './routes/debug.js';
+import { usersRoutes } from './routes/users.js';
+import { ticketsRoutes } from './routes/tickets.js';
+import { toolsRoutes } from './routes/tools.js';
+import { checkMaintenanceMode } from './middleware/systemChecks.js';
+import { adminSystemRoutes } from './routes/admin/system.js';
+import { adminAlertsRoutes } from './routes/admin/alerts.js';
+import { adminHealthRoutes } from './routes/admin/health.js';
+import { adminAuditRoutes } from './routes/admin/audit.js';
+import { adminToolsRoutes } from './routes/admin/tools.js';
+
+export function buildServer() {
+  const fastify = Fastify({
+    logger: {
+      transport: {
+        target: 'pino-pretty',
+        options: { colorize: true },
+      },
+    },
+    // Allow up to 20 MB bodies to support base64-encoded image uploads
+    bodyLimit: 20 * 1024 * 1024,
+  });
+
+  fastify.register(sensible);
+  fastify.register(multipart, {
+    limits: {
+      fileSize: 100 * 1024 * 1024, // 100 MB
+      files: 1,
+    },
+  });
+  fastify.register(cors, {
+    origin: (process.env.CORS_ORIGINS || 'http://localhost:3001')
+      .split(',')
+      .map(o => o.trim()),
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true,
+  });
+
+  // Public routes — no auth required
+  fastify.register(healthRoutes);
+  fastify.register(authRoutes);
+
+  // Protected routes — all /v1/* require a valid JWT
+  fastify.register(async (instance) => {
+    instance.addHook('preHandler', authenticate);
+    // Maintenance mode check runs after auth so admins can bypass it
+    instance.addHook('preHandler', checkMaintenanceMode);
+
+    // ── User + Admin endpoints ───────────────────────────────────────────────
+    // generate, stream, batch — rate-limited per user (via route-level preHandler)
+    instance.register(generateRoutes);
+    instance.register(streamRoutes);
+    instance.register(batchRoutes);
+    // analytics — /v1/logs & /v1/usage user-filtered; /v1/errors admin-only (inline)
+    instance.register(analyticsRoutes);
+    // users — /v1/users/me open; admin sub-routes protected inline
+    instance.register(usersRoutes);
+    // tickets — ownership checked inline; admin-only mutate routes protected inline
+    instance.register(ticketsRoutes);
+    // tools — active tools visible to all; download tracked; admin CRUD inline
+    instance.register(toolsRoutes);
+
+    // ── Admin-only endpoints ─────────────────────────────────────────────────
+    instance.register(async (admin) => {
+      admin.addHook('preHandler', requireAdmin);
+
+      admin.register(keysRoutes);
+      admin.register(modelsRoutes);
+      admin.register(queueRoutes);
+      admin.register(metricsRoutes);
+      admin.register(debugRoutes);
+
+      // New admin control panel routes
+      admin.register(adminSystemRoutes);
+      admin.register(adminAlertsRoutes);
+      admin.register(adminHealthRoutes);
+      admin.register(adminAuditRoutes);
+      admin.register(adminToolsRoutes);
+    });
+  });
+
+  return fastify;
+}

@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -e \"import\\('@fastify/sensible'\\).then\\(m => console.log\\('version ok'\\)\\)\")",
+      "Bash(npm install:*)",
+      "Bash(node --input-type=module)",
+      "Bash(node -e \"import\\('./node_modules/bullmq/dist/esm/index.js'\\).then\\(m => { const w = new m.Worker; console.log\\(Object.keys\\(m.Worker.prototype\\)\\) }\\).catch\\(\\(\\)=>{}\\)\")",
+      "Bash(npm list:*)",
+      "Bash(node --input-type=module --eval ':*)",
+      "Bash(node --input-type=module --eval \"import './src/middleware/rateLimiter.js'; import './src/queue/worker.js'; console.log\\('OK'\\);\")"
+    ]
+  }
+}
