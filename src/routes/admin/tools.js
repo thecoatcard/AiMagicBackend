@@ -26,11 +26,9 @@ export async function adminToolsRoutes(fastify) {
   //                             file attachment (zip)
   //   2. application/json     — same fields + external_url (no file)
   fastify.post('/v1/admin/tools', async (request, reply) => {
-    const contentType = request.headers['content-type'] || '';
-
     let toolData;
 
-    if (contentType.includes('multipart/form-data')) {
+    if (request.isMultipart) {
       // ── Multipart upload path ──
       ensureUploadsDir();
 
