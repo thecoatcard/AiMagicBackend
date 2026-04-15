@@ -1,4 +1,5 @@
 import { createReadStream, existsSync } from 'fs';
+import { ObjectId } from 'mongodb';
 import { getToolsBucket } from '../db/gridfs.js';
 import { getTool, listTools, incrementDownloadCount } from '../db/tools.js';
 
@@ -85,7 +86,14 @@ export async function toolsRoutes(fastify) {
       // Stream from GridFS (New implementation)
       const bucket = await getToolsBucket();
       try {
-        const downloadStream = bucket.openDownloadStream(tool.file_id);
+        const downloadStream = bucket.openDownloadStream(new ObjectId(tool.file_id));
+        
+        downloadStream.on('error', (err) => {
+          if (!reply.sent) {
+            reply.status(404).send({ error: 'Tool file not found in database' });
+          }
+        });
+
         return reply.send(downloadStream);
       } catch (err) {
         reply.status(404);
