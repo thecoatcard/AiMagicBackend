@@ -70,7 +70,7 @@ export async function ticketsRoutes(fastify) {
     preHandler: requireAdmin,
   }, async (request, reply) => {
     try {
-      return getTicketStats();
+      return await getTicketStats();
     } catch {
       reply.status(503);
       return { error: 'Database unavailable', code: 'DB_UNAVAILABLE' };

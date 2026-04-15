@@ -173,7 +173,7 @@ export async function ensureOwner(email) {
  * List users with filtering, text search, and sorting.
  * @param {{ role?, plan?, status?, email?, limit?, skip?, sort? }} opts
  */
-export async function listUsersFiltered({ role, plan, status, email, limit = 50, skip = 0, sort = 'created_at' } = {}) {
+export async function listUsersFiltered({ role, plan, status, email, limit = 50, skip = 0, sort = 'created' } = {}) {
   const db = await getDb();
   const filter = {};
   if (role)   filter.role   = role;

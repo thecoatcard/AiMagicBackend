@@ -7,7 +7,10 @@
       "Bash(node -e \"import\\('./node_modules/bullmq/dist/esm/index.js'\\).then\\(m => { const w = new m.Worker; console.log\\(Object.keys\\(m.Worker.prototype\\)\\) }\\).catch\\(\\(\\)=>{}\\)\")",
       "Bash(npm list:*)",
       "Bash(node --input-type=module --eval ':*)",
-      "Bash(node --input-type=module --eval \"import './src/middleware/rateLimiter.js'; import './src/queue/worker.js'; console.log\\('OK'\\);\")"
+      "Bash(node --input-type=module --eval \"import './src/middleware/rateLimiter.js'; import './src/queue/worker.js'; console.log\\('OK'\\);\")",
+      "Bash(grep -iE \"\\\\.env|readme|env\\\\.example\" ls /c/Users/AnandKumarShukla/Documents/KeyManagement/.env*)",
+      "Bash(sed -n '65,78p' /c/Users/AnandKumarShukla/Documents/KeyManagement/src/routes/users.js)",
+      "Bash(sed -n '68,79p' /c/Users/AnandKumarShukla/Documents/KeyManagement/src/routes/tickets.js)"
     ]
   }
 }

@@ -12,7 +12,7 @@ import {
 } from '../db/users.js';
 import { requireAdmin, requireOwner } from '../auth/roles.js';
 import { invalidateUserLimitsCache } from '../middleware/rateLimiter.js';
-import { invalidateSession, createSession } from '../auth/session.js';
+import { invalidateSession } from '../auth/session.js';
 import { config } from '../config.js';
 import { ASSIGNABLE_PLANS, getDailyLimit } from '../config/plans.js';
 import {
@@ -57,9 +57,9 @@ export async function usersRoutes(fastify) {
     // Only filter if any filter param was provided
     const hasFilter = role || plan || status || email || sort !== 'created';
     if (hasFilter) {
-      return listUsersFiltered({ limit, skip, role, plan, status, email, sort });
+      return await listUsersFiltered({ limit, skip, role, plan, status, email, sort });
     }
-    return listUsers({ limit, skip });
+    return await listUsers({ limit, skip });
   });
 
   // ── GET /v1/users/stats — aggregate user statistics (admin only) ──────────
@@ -67,7 +67,7 @@ export async function usersRoutes(fastify) {
     preHandler: requireAdmin,
   }, async (request, reply) => {
     try {
-      return getUserStats();
+      return await getUserStats();
     } catch {
       reply.status(503);
       return { error: 'Database unavailable', code: 'DB_UNAVAILABLE' };

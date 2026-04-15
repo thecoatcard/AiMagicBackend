@@ -1,7 +1,6 @@
 import { createWriteStream, existsSync, mkdirSync, unlinkSync } from 'fs';
 import { join, extname } from 'path';
 import { randomUUID } from 'crypto';
-import { pipeline } from 'stream/promises';
 import {
   createTool,
   getTool,
