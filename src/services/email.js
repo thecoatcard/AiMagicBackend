@@ -13,8 +13,10 @@ export async function sendEmail(to, template, data = {}) {
     return;
   }
 
+  const url = config.frontendEmailUrl.replace(/([^:])\/\//g, '$1/').replace(/\/$/, '') + (config.frontendEmailUrl.endsWith('/api/email/send') ? '' : '/api/email/send');
+
   try {
-    const response = await fetch(config.frontendEmailUrl, {
+    const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -23,7 +25,15 @@ export async function sendEmail(to, template, data = {}) {
       body: JSON.stringify({ to, template, data })
     });
 
-    const result = await response.json();
+    let result;
+    const contentType = response.headers.get('content-type');
+    if (contentType && contentType.includes('application/json')) {
+      result = await response.json();
+    } else {
+      const text = await response.text();
+      result = { error: text.slice(0, 200) };
+    }
+
 
     if (!response.ok) {
       throw new Error(result.error || `HTTP error ${response.status}`);
