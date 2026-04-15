@@ -23,6 +23,7 @@ const DEFAULTS = {
   payment_upi_1:           '',
   payment_upi_2:           '',
   payment_qr_path:         '',
+  payment_qr_file_id:      '',
   // Email Notification Toggles (1=enabled, 0=disabled)
   email_security_enabled:  '1',
   email_status_enabled:    '1',

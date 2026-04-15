@@ -1,3 +1,4 @@
+import { ObjectId } from 'mongodb';
 import {
   getAllSystemConfig,
   setSystemConfig,
@@ -10,9 +11,9 @@ import {
   removeWhitelistRule,
 } from '../../db/whitelist.js';
 import { writeAuditLog } from '../../db/auditLog.js';
-import { createWriteStream, existsSync, mkdirSync, unlinkSync } from 'fs';
+import { existsSync, mkdirSync, unlinkSync } from 'fs';
 import { join, extname } from 'path';
-import { randomUUID } from 'crypto';
+import { getToolsBucket } from '../../db/gridfs.js';
 
 const UPLOADS_DIR = join(process.cwd(), 'uploads', 'payments');
 
@@ -206,7 +207,6 @@ export async function adminSystemRoutes(fastify) {
       return { error: 'Multipart request required', code: 'NOT_MULTIPART' };
     }
 
-    ensureUploadsDir();
     const part = await request.file();
     if (!part) {
       reply.status(400);
@@ -220,26 +220,42 @@ export async function adminSystemRoutes(fastify) {
       return { error: 'Only image files (jpg, png, webp) are allowed', code: 'INVALID_TYPE' };
     }
 
-    // Clean up old QR if exists
     const cfg = await getAllSystemConfig();
+    const bucket = await getToolsBucket();
+
+    // 1. Clean up old GridFS file if exists
+    if (cfg.payment_qr_file_id) {
+      try { await bucket.delete(new ObjectId(cfg.payment_qr_file_id)); } catch {}
+    }
+
+    // 2. Clean up old disk QR if exists (Legacy)
     if (cfg.payment_qr_path && existsSync(cfg.payment_qr_path)) {
       try { unlinkSync(cfg.payment_qr_path); } catch {}
     }
 
-    const uniqueName = `qr_${randomUUID()}${ext}`;
-    const savedPath = join(UPLOADS_DIR, uniqueName);
-
-    const writeStream = createWriteStream(savedPath);
-    await new Promise((res, rej) => {
-      part.file.pipe(writeStream);
-      writeStream.on('finish', res);
-      writeStream.on('error', rej);
+    // 3. Stream to GridFS
+    const uploadStream = bucket.openUploadStream(part.filename, {
+      contentType: part.mimetype,
+      metadata: { type: 'payment_qr', originalName: part.filename }
     });
 
-    await setSystemConfig({ payment_qr_path: savedPath });
-    writeAuditLog({ actorEmail: request.user.email, action: 'payment_qr_upload', meta: { filename: part.filename } });
+    await new Promise((res, rej) => {
+      part.file.pipe(uploadStream);
+      uploadStream.on('finish', res);
+      uploadStream.on('error', rej);
+    });
+
+    const fileId = uploadStream.id.toString();
+
+    // 4. Update config
+    await setSystemConfig({ 
+      payment_qr_file_id: fileId,
+      payment_qr_path: '' // Clear legacy path
+    });
+
+    writeAuditLog({ actorEmail: request.user.email, action: 'payment_qr_upload', meta: { filename: part.filename, fileId } });
     
-    return { success: true, filename: part.filename };
+    return { success: true, filename: part.filename, fileId };
   });
 
   // ── GET /v1/admin/system/emails — email notification status ────────────────
