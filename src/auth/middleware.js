@@ -16,14 +16,19 @@ const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
  * are blocked.
  */
 export async function authenticate(request, reply) {
+  let token = null;
   const authHeader = request.headers['authorization'];
 
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    token = authHeader.slice(7);
+  } else if (request.query?.token) {
+    token = request.query.token;
+  }
+
+  if (!token) {
     reply.status(401).send({ error: 'Missing or malformed Authorization header', code: 'UNAUTHORIZED' });
     return;
   }
-
-  const token = authHeader.slice(7);
 
   // ── Fast path: check if this is an impersonation token ───────────────────
   let rawPayload;

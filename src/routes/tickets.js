@@ -16,10 +16,8 @@ import {
 } from '../services/notifications.js';
 import { writeAuditLog } from '../db/auditLog.js';
 import { createReadStream, existsSync } from 'fs';
-import { pipeline } from 'stream/promises';
-import { createWriteStream } from 'fs';
-import { join } from 'path';
-import { randomBytes } from 'crypto';
+import { ObjectId } from 'mongodb';
+import { getToolsBucket } from '../db/gridfs.js';
 
 const VALID_STATUSES   = ['open', 'in_progress', 'resolved', 'closed'];
 const VALID_PRIORITIES = ['low', 'medium', 'high'];
@@ -32,22 +30,34 @@ export async function ticketsRoutes(fastify) {
       return { error: 'Request must be multipart/form-data', code: 'BAD_REQUEST' };
     }
 
-    let subject, description, priority = 'medium', screenshotPath = null;
+    let subject, description, priority = 'medium', screenshotId = null;
     const parts = request.parts();
+
+    const bucket = await getToolsBucket();
 
     for await (const part of parts) {
       if (part.type === 'file') {
         if (part.fieldname === 'screenshot') {
           const ext = part.filename.split('.').pop().toLowerCase();
-          const allowed = ['jpg', 'jpeg', 'png', 'webp'];
+          const allowed = ['jpg', 'jpeg', 'png', 'webp', 'gif'];
           if (!allowed.includes(ext)) {
             reply.status(400);
             return { error: 'Invalid file type. Only JPG, PNG, and WebP are allowed.', code: 'INVALID_FILE' };
           }
-          const fname = `${randomBytes(16).toString('hex')}.${ext}`;
-          const fpath = join('uploads/tickets', fname);
-          await pipeline(part.file, createWriteStream(fpath));
-          screenshotPath = fpath;
+          
+          // Stream directly to GridFS
+          const uploadStream = bucket.openUploadStream(part.filename, {
+            contentType: part.mimetype || `image/${ext === 'jpg' ? 'jpeg' : ext}`,
+            metadata: { type: 'ticket_screenshot', user: request.user.email }
+          });
+
+          await new Promise((res, rej) => {
+            part.file.pipe(uploadStream);
+            uploadStream.on('finish', res);
+            uploadStream.on('error', rej);
+          });
+
+          screenshotId = uploadStream.id.toString();
         }
       } else {
         if (part.fieldname === 'subject') subject = part.value;
@@ -72,7 +82,7 @@ export async function ticketsRoutes(fastify) {
         subject,
         description,
         priority,
-        screenshotPath,
+        screenshotId,
       });
     } catch (err) {
       reply.status(503);
@@ -97,12 +107,11 @@ export async function ticketsRoutes(fastify) {
     return ticket;
   });
 
-  // ── GET /v1/tickets/:id/screenshot — serve ticket screenshot ────────────────
   fastify.get('/v1/tickets/:id/screenshot', async (request, reply) => {
     const ticket = await getTicketById(request.params.id);
-    if (!ticket || !ticket.screenshot_path) {
+    if (!ticket) {
       reply.status(404);
-      return { error: 'Screenshot not found', code: 'NOT_FOUND' };
+      return { error: 'Ticket not found', code: 'NOT_FOUND' };
     }
 
     // Auth check: Admin or owner of the ticket
@@ -112,20 +121,40 @@ export async function ticketsRoutes(fastify) {
       return { error: 'Forbidden', code: 'FORBIDDEN' };
     }
 
-    if (!existsSync(ticket.screenshot_path)) {
-      reply.status(404);
-      return { error: 'Screenshot file missing', code: 'FILE_MISSING' };
+    // 1. Prefer GridFS
+    if (ticket.screenshot_id) {
+      const bucket = await getToolsBucket();
+      try {
+        const downloadStream = bucket.openDownloadStream(new ObjectId(ticket.screenshot_id));
+        
+        downloadStream.on('error', () => {
+          if (!reply.sent) reply.status(404).send({ error: 'Screenshot not found in database' });
+        });
+
+        // We don't strictly know the content type here unless we query GridFS files, 
+        // but image/png is a safe default for browser rendering of common formats.
+        reply.header('Content-Type', 'image/png'); 
+        return reply.send(downloadStream);
+      } catch (err) {
+        // Fall through
+      }
     }
 
-    const ext = ticket.screenshot_path.split('.').pop().toLowerCase();
-    const mimeTypesMapping = {
-      png: 'image/png',
-      jpg: 'image/jpeg',
-      jpeg: 'image/jpeg',
-      webp: 'image/webp',
-    };
-    reply.header('Content-Type', mimeTypesMapping[ext] || 'application/octet-stream');
-    return reply.send(createReadStream(ticket.screenshot_path));
+    // 2. Fallback to Disk (Legacy)
+    if (ticket.screenshot_path && existsSync(ticket.screenshot_path)) {
+      const ext = ticket.screenshot_path.split('.').pop().toLowerCase();
+      const mimeTypesMapping = {
+        png: 'image/png',
+        jpg: 'image/jpeg',
+        jpeg: 'image/jpeg',
+        webp: 'image/webp',
+      };
+      reply.header('Content-Type', mimeTypesMapping[ext] || 'application/octet-stream');
+      return reply.send(createReadStream(ticket.screenshot_path));
+    }
+
+    reply.status(404);
+    return { error: 'Screenshot not found', code: 'NOT_FOUND' };
   });
 
   // ── GET /v1/tickets/stats — ticket statistics (admin only) ───────────────
