@@ -23,6 +23,12 @@ const DEFAULTS = {
   payment_upi_1:           '',
   payment_upi_2:           '',
   payment_qr_path:         '',
+  // Email Notification Toggles (1=enabled, 0=disabled)
+  email_security_enabled:  '1',
+  email_status_enabled:    '1',
+  email_tickets_enabled:   '1',
+  email_quota_enabled:     '1',
+  email_admin_alerts_enabled: '1',
 };
 
 /**

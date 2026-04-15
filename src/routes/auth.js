@@ -79,11 +79,10 @@ export async function authRoutes(fastify) {
     const userDoc = await getOrCreateUser(email);
     const role = userDoc?.role ?? 'user';
 
-    // Create new session — auto-invalidates any existing session (other device)
-    const { token, hadPreviousSession } = await createSession(email, role, userDoc?.plan ?? 'free');
+    // Create new session — enforces limit (1 for user, 3 for admin/owner)
+    const { token, wasSuperseded } = await createSession(email, role, userDoc?.plan ?? 'free');
 
-    // One email per login — combined if a previous session was ended, plain new-sign-in otherwise
-    if (hadPreviousSession) {
+    if (wasSuperseded) {
       notifySessionInvalidated(email);
     } else {
       notifyNewDeviceLogin(email);
@@ -91,17 +90,17 @@ export async function authRoutes(fastify) {
 
     return {
       token,
-      message: hadPreviousSession
-        ? 'Logged in. Previous session on another device has been invalidated.'
+      message: wasSuperseded
+        ? 'Logged in. Your oldest session on another device has been invalidated.'
         : 'Logged in successfully.',
     };
   });
 
-  // ── Logout ───────────────────────────────────────────────────────────────
   fastify.post('/auth/logout', {
     preHandler: authenticate,
   }, async (request) => {
-    await invalidateSession(request.user.email);
+    // Only invalidate THIS session ID (this device), not all of them
+    await invalidateSession(request.user.email, request.user.sessionId);
     return { message: 'Logged out successfully.' };
   });
 

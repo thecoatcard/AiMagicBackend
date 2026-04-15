@@ -14,7 +14,8 @@ import { requireAdmin, requireOwner } from '../auth/roles.js';
 import { invalidateUserLimitsCache } from '../middleware/rateLimiter.js';
 import { invalidateSession } from '../auth/session.js';
 import { config } from '../config.js';
-import { ASSIGNABLE_PLANS, getDailyLimit } from '../config/plans.js';
+import { ASSIGNABLE_PLANS } from '../config/plans.js';
+import { getPlanDailyLimit } from '../redis/systemConfig.js';
 import {
   notifyAccountBlocked,
   notifyAccountUnblocked,
@@ -294,7 +295,7 @@ export async function usersRoutes(fastify) {
     notifyPlanChanged(email, {
       oldPlan:  existingUser?.plan ?? 'free',
       newPlan:  plan,
-      newLimit: getDailyLimit(plan),
+      newLimit: await getPlanDailyLimit(plan),
     });
     return { updated: true, email, plan };
   });

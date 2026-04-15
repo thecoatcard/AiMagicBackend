@@ -241,4 +241,48 @@ export async function adminSystemRoutes(fastify) {
     
     return { success: true, filename: part.filename };
   });
+
+  // ── GET /v1/admin/system/emails — email notification status ────────────────
+  fastify.get('/v1/admin/system/emails', async () => {
+    const cfg = await getAllSystemConfig();
+    return {
+      security:    cfg.email_security_enabled     === '1',
+      status:      cfg.email_status_enabled       === '1',
+      tickets:     cfg.email_tickets_enabled      === '1',
+      quota:       cfg.email_quota_enabled        === '1',
+      admin_health:cfg.email_admin_alerts_enabled === '1',
+      otp:         true, // Always ON, non-toggleable
+    };
+  });
+
+  // ── PATCH /v1/admin/system/emails — update email toggles ───────────────────
+  fastify.patch('/v1/admin/system/emails', {
+    schema: {
+      body: {
+        type: 'object',
+        properties: {
+          security:     { type: 'boolean' },
+          status:       { type: 'boolean' },
+          tickets:      { type: 'boolean' },
+          quota:        { type: 'boolean' },
+          admin_health: { type: 'boolean' },
+        },
+        additionalProperties: false,
+      },
+    },
+  }, async (request) => {
+    const updates = {};
+    if (request.body.security     !== undefined) updates.email_security_enabled     = request.body.security     ? '1' : '0';
+    if (request.body.status       !== undefined) updates.email_status_enabled       = request.body.status       ? '1' : '0';
+    if (request.body.tickets      !== undefined) updates.email_tickets_enabled      = request.body.tickets      ? '1' : '0';
+    if (request.body.quota        !== undefined) updates.email_quota_enabled        = request.body.quota        ? '1' : '0';
+    if (request.body.admin_health !== undefined) updates.email_admin_alerts_enabled = request.body.admin_health ? '1' : '0';
+
+    if (Object.keys(updates).length > 0) {
+      await setSystemConfig(updates);
+    }
+
+    writeAuditLog({ actorEmail: request.user.email, action: 'email_config_update', meta: request.body });
+    return { updated: true, ...request.body };
+  });
 }

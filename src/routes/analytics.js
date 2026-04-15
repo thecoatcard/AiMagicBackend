@@ -2,7 +2,8 @@ import { getDb } from '../db/client.js';
 import { getUser } from '../db/users.js';
 import { requireAdmin } from '../auth/roles.js';
 import { getDailyUsage } from '../middleware/rateLimiter.js';
-import { getDailyLimit, PLANS } from '../config/plans.js';
+import { PLANS } from '../config/plans.js';
+import { getPlanDailyLimit } from '../redis/systemConfig.js';
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 500;
@@ -350,7 +351,7 @@ export async function analyticsRoutes(fastify) {
     // Fetch user plan + custom limit override from DB
     const user = await getUser(email);
     const plan  = user?.plan ?? 'free';
-    const limit = user?.limits?.max_requests_per_day ?? getDailyLimit(plan);
+    const limit = user?.limits?.max_requests_per_day ?? await getPlanDailyLimit(plan);
 
     const { used, reset_in_seconds } = await getDailyUsage(email);
     const remaining = Math.max(0, limit - used);

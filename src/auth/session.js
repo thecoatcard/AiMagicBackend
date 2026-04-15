@@ -3,7 +3,7 @@ import jwt from 'jsonwebtoken';
 import { getRedis } from '../redis/client.js';
 import { config } from '../config.js';
 
-const SESSION_PREFIX = 'session:';
+const SESSION_PREFIX = 'sessions:v2:'; // Using v2 prefix to avoid collisions with old session keys
 
 function sessionKey(email) {
   return `${SESSION_PREFIX}${email}`;
@@ -12,25 +12,34 @@ function sessionKey(email) {
 /**
  * Create a new session for the user.
  * - Generates a unique sessionId
- * - Overwrites any existing session in Redis (single-device enforcement)
- * - Returns a signed JWT containing { email, sessionId, role }
+ * - Stores in a Redis Sorted Set (ZSET) to allow multiple devices
+ * - Enforces limits: 3 for admins/owners, 1 for regular users
+ * - Returns a signed JWT and whether the oldest session was kicked out
  *
  * @param {string} email
  * @param {string} [role='user']
  * @param {string} [plan='free']
- * @returns {{ token: string, hadPreviousSession: boolean }}
+ * @returns {{ token: string, wasSuperseded: boolean }}
  */
 export async function createSession(email, role = 'user', plan = 'free') {
   const redis = getRedis();
   const sessionId = randomBytes(32).toString('hex');
+  const key = sessionKey(email);
+  const now = Date.now();
 
-  // Check if there's an existing session (another device)
-  const existing = await redis.get(sessionKey(email));
+  // Role-based session limits
+  const limit = (role === 'admin' || role === 'owner') ? 3 : 1;
 
-  // Store new session — overwrite previous, with TTL matching the JWT expiry
-  // so the Redis key is automatically cleaned up when the token is no longer valid.
+  // Add new session to the set
+  await redis.zadd(key, now, sessionId);
+
+  // Set/Refresh TTL for the entire set (matching JWT expiry)
   const ttlSeconds = parseDurationToSeconds(config.jwtExpiresIn);
-  await redis.set(sessionKey(email), sessionId, 'EX', ttlSeconds);
+  await redis.expire(key, ttlSeconds);
+
+  // Remove oldest sessions if we exceed the limit
+  // ZREMRANGEBYRANK 0 -(limit+1) removes the oldest ones, keeping only the 'limit' highest scores (newest)
+  const removedCount = await redis.zremrangebyrank(key, 0, -(limit + 1));
 
   const token = jwt.sign(
     { email, sessionId, role, plan },
@@ -38,12 +47,12 @@ export async function createSession(email, role = 'user', plan = 'free') {
     { expiresIn: config.jwtExpiresIn }
   );
 
-  return { token, hadPreviousSession: !!existing };
+  return { token, wasSuperseded: removedCount > 0 };
 }
 
 /**
- * Validate a JWT token and verify the session is still active.
- * Returns { valid: true, email, sessionId } or { valid: false, reason }
+ * Validate a JWT token and verify the specific session is still active in Redis.
+ * Returns { valid: true, ... } or { valid: false, reason }
  */
 export async function validateSession(token) {
   let payload;
@@ -54,26 +63,37 @@ export async function validateSession(token) {
   }
 
   const { email, sessionId, role, plan } = payload;
+  const key = sessionKey(email);
 
-  // Check Redis — session must match (single-device check)
-  const stored = await getRedis().get(sessionKey(email));
+  // Check if this specific sessionId still exists in the Sorted Set
+  const score = await getRedis().zscore(key, sessionId);
 
-  if (!stored) {
-    return { valid: false, reason: 'session_not_found' };
+  if (!score) {
+    // Session was either never created, manually logged out, 
+    // or superseded by a newer device/expired.
+    return { valid: false, reason: 'session_invalid_or_superseded' };
   }
 
-  if (stored !== sessionId) {
-    return { valid: false, reason: 'session_superseded' }; // logged in elsewhere
-  }
+  // Optional: update timestamp to keep session at the "top" of the stack (sliding window)
+  // await getRedis().zadd(key, Date.now(), sessionId);
 
   return { valid: true, email, sessionId, role: role ?? 'user', plan: plan ?? 'free' };
 }
 
 /**
- * Invalidate the current session for a user (logout).
+ * Invalidate session(s) for a user.
+ * @param {string} email
+ * @param {string} [sessionId] - if provided, only that specific device is logged out.
+ *                               if null, ALL devices for this user are logged out.
  */
-export async function invalidateSession(email) {
-  await getRedis().del(sessionKey(email));
+export async function invalidateSession(email, sessionId = null) {
+  const redis = getRedis();
+  const key = sessionKey(email);
+  if (sessionId) {
+    await redis.zrem(key, sessionId);
+  } else {
+    await redis.del(key);
+  }
 }
 
 /**
