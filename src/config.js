@@ -11,9 +11,10 @@ export const config = {
   mongodbUri: process.env.MONGODB_URI || 'mongodb://localhost:27017',
   mongodbName: process.env.MONGODB_NAME || 'keymanagement',
   workerConcurrency: parseInt(process.env.WORKER_CONCURRENCY || '5', 10),
-  // Email
-  emailUser: process.env.EMAIL_USER || '',
-  emailPass: process.env.EMAIL_PASS || '',
+  // Email (Now handled by Frontend)
+  frontendEmailUrl: process.env.FRONTEND_URL ? `${process.env.FRONTEND_URL}/api/email/send` : 'http://localhost:3000/api/email/send',
+  emailApiSecret: process.env.EMAIL_API_SECRET || '',
+
   // Auth
   jwtSecret: process.env.JWT_SECRET || (() => {
     if (process.env.NODE_ENV !== 'test') {

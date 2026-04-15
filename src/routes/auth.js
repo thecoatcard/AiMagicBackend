@@ -1,7 +1,8 @@
 import { generateOtp, verifyOtp } from '../auth/otp.js';
 import { createSession, invalidateSession } from '../auth/session.js';
 import { sendEmail } from '../services/email.js';
-import { otpTemplate } from '../services/emailTemplates.js';
+// Removed: import { otpTemplate } from '../services/emailTemplates.js';
+
 import { notifyNewDeviceLogin, notifySessionInvalidated } from '../services/notifications.js';
 import { authenticate } from '../auth/middleware.js';
 import { getOrCreateUser } from '../db/users.js';
@@ -41,8 +42,9 @@ export async function authRoutes(fastify) {
     const otp = await generateOtp(email);
 
     try {
-      await sendEmail(email, otpTemplate({ otp }));
+      await sendEmail(email, 'otp', { otp });
     } catch (err) {
+
       fastify.log.error({ err }, '[auth] failed to send OTP email');
       reply.status(502);
       return { error: 'Failed to send OTP email', code: 'EMAIL_ERROR' };

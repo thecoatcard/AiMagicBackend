@@ -1,33 +1,37 @@
-import nodemailer from 'nodemailer';
 import { config } from '../config.js';
 
-let _transporter;
-
-function getTransporter() {
-  if (!_transporter) {
-    _transporter = nodemailer.createTransport({
-      service: 'gmail',
-      auth: {
-        user: config.emailUser,
-        pass: config.emailPass,
-      },
-    });
-  }
-  return _transporter;
-}
-
 /**
- * Generic email sender — used by the notifications layer.
- *
- * @param {string} to          - recipient address
- * @param {{ subject: string, html: string, text?: string }} opts
+ * Sends an email by calling the Frontend's email API.
+ * 
+ * @param {string} to - Recipient address
+ * @param {string} template - Name of the template to use
+ * @param {object} data - Data to pass to the template
  */
-export async function sendEmail(to, { subject, html, text }) {
-  await getTransporter().sendMail({
-    from: `"Gemini Proxy" <${config.emailUser}>`,
-    to,
-    subject,
-    text: text ?? subject, // plain-text fallback
-    html,
-  });
+export async function sendEmail(to, template, data = {}) {
+  if (!config.emailApiSecret) {
+    console.error('[email] EMAIL_API_SECRET is not set. Cannot send email.');
+    return;
+  }
+
+  try {
+    const response = await fetch(config.frontendEmailUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${config.emailApiSecret}`
+      },
+      body: JSON.stringify({ to, template, data })
+    });
+
+    const result = await response.json();
+
+    if (!response.ok) {
+      throw new Error(result.error || `HTTP error ${response.status}`);
+    }
+
+    return result;
+  } catch (err) {
+    console.error(`[email] Failed to send ${template} email to ${to}:`, err.message);
+    throw err;
+  }
 }
