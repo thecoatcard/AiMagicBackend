@@ -80,7 +80,7 @@ export async function authRoutes(fastify) {
     const role = userDoc?.role ?? 'user';
 
     // Create new session — auto-invalidates any existing session (other device)
-    const { token, hadPreviousSession } = await createSession(email, role);
+    const { token, hadPreviousSession } = await createSession(email, role, userDoc?.plan ?? 'free');
 
     // One email per login — combined if a previous session was ended, plain new-sign-in otherwise
     if (hadPreviousSession) {

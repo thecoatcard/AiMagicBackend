@@ -10,6 +10,17 @@ import {
   removeWhitelistRule,
 } from '../../db/whitelist.js';
 import { writeAuditLog } from '../../db/auditLog.js';
+import { createWriteStream, existsSync, mkdirSync, unlinkSync } from 'fs';
+import { join, extname } from 'path';
+import { randomUUID } from 'crypto';
+
+const UPLOADS_DIR = join(process.cwd(), 'uploads', 'payments');
+
+function ensureUploadsDir() {
+  if (!existsSync(UPLOADS_DIR)) {
+    mkdirSync(UPLOADS_DIR, { recursive: true });
+  }
+}
 
 export async function adminSystemRoutes(fastify) {
   // ── GET /v1/admin/system — full runtime config ─────────────────────────────
@@ -163,5 +174,71 @@ export async function adminSystemRoutes(fastify) {
     }
     writeAuditLog({ actorEmail: request.user.email, action: 'whitelist_remove', meta: { type, value } });
     return { removed: true, type, value };
+  });
+
+  // ── PATCH /v1/admin/system/payment — update UPI IDs ────────────────────────
+  fastify.patch('/v1/admin/system/payment', {
+    schema: {
+      body: {
+        type: 'object',
+        properties: {
+          upi_1: { type: 'string', maxLength: 100 },
+          upi_2: { type: 'string', maxLength: 100 },
+        },
+        additionalProperties: false,
+      },
+    },
+  }, async (request) => {
+    const { upi_1, upi_2 } = request.body;
+    const updates = {};
+    if (upi_1 !== undefined) updates.payment_upi_1 = upi_1;
+    if (upi_2 !== undefined) updates.payment_upi_2 = upi_2;
+    
+    await setSystemConfig(updates);
+    writeAuditLog({ actorEmail: request.user.email, action: 'payment_config_update', meta: request.body });
+    return { updated: true, ...request.body };
+  });
+
+  // ── POST /v1/admin/system/payment-qr — upload QR code ──────────────────────
+  fastify.post('/v1/admin/system/payment-qr', async (request, reply) => {
+    if (!request.isMultipart) {
+      reply.status(400);
+      return { error: 'Multipart request required', code: 'NOT_MULTIPART' };
+    }
+
+    ensureUploadsDir();
+    const part = await request.file();
+    if (!part) {
+      reply.status(400);
+      return { error: 'No file uploaded', code: 'NO_FILE' };
+    }
+
+    const ext = extname(part.filename).toLowerCase();
+    const allowed = ['.jpg', '.jpeg', '.png', '.webp'];
+    if (!allowed.includes(ext)) {
+      reply.status(400);
+      return { error: 'Only image files (jpg, png, webp) are allowed', code: 'INVALID_TYPE' };
+    }
+
+    // Clean up old QR if exists
+    const cfg = await getAllSystemConfig();
+    if (cfg.payment_qr_path && existsSync(cfg.payment_qr_path)) {
+      try { unlinkSync(cfg.payment_qr_path); } catch {}
+    }
+
+    const uniqueName = `qr_${randomUUID()}${ext}`;
+    const savedPath = join(UPLOADS_DIR, uniqueName);
+
+    const writeStream = createWriteStream(savedPath);
+    await new Promise((res, rej) => {
+      part.file.pipe(writeStream);
+      writeStream.on('finish', res);
+      writeStream.on('error', rej);
+    });
+
+    await setSystemConfig({ payment_qr_path: savedPath });
+    writeAuditLog({ actorEmail: request.user.email, action: 'payment_qr_upload', meta: { filename: part.filename } });
+    
+    return { success: true, filename: part.filename };
   });
 }

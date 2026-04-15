@@ -7,6 +7,7 @@ import { requireAdmin } from './auth/roles.js';
 import { authRoutes } from './routes/auth.js';
 import { healthRoutes } from './routes/health.js';
 import { generateRoutes } from './routes/generate.js';
+import { systemRoutes } from './routes/system.js';
 import { keysRoutes } from './routes/keys.js';
 import { modelsRoutes } from './routes/models.js';
 import { streamRoutes } from './routes/stream.js';
@@ -57,6 +58,7 @@ export function buildServer() {
   // Public routes — no auth required
   fastify.register(healthRoutes);
   fastify.register(authRoutes);
+  fastify.register(systemRoutes);
 
   // Protected routes — all /v1/* require a valid JWT
   fastify.register(async (instance) => {

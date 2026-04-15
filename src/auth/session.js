@@ -17,9 +17,10 @@ function sessionKey(email) {
  *
  * @param {string} email
  * @param {string} [role='user']
+ * @param {string} [plan='free']
  * @returns {{ token: string, hadPreviousSession: boolean }}
  */
-export async function createSession(email, role = 'user') {
+export async function createSession(email, role = 'user', plan = 'free') {
   const redis = getRedis();
   const sessionId = randomBytes(32).toString('hex');
 
@@ -32,7 +33,7 @@ export async function createSession(email, role = 'user') {
   await redis.set(sessionKey(email), sessionId, 'EX', ttlSeconds);
 
   const token = jwt.sign(
-    { email, sessionId, role },
+    { email, sessionId, role, plan },
     config.jwtSecret,
     { expiresIn: config.jwtExpiresIn }
   );
@@ -52,7 +53,7 @@ export async function validateSession(token) {
     return { valid: false, reason: err.name === 'TokenExpiredError' ? 'token_expired' : 'invalid_token' };
   }
 
-  const { email, sessionId, role } = payload;
+  const { email, sessionId, role, plan } = payload;
 
   // Check Redis — session must match (single-device check)
   const stored = await getRedis().get(sessionKey(email));
@@ -65,7 +66,7 @@ export async function validateSession(token) {
     return { valid: false, reason: 'session_superseded' }; // logged in elsewhere
   }
 
-  return { valid: true, email, sessionId, role: role ?? 'user' };
+  return { valid: true, email, sessionId, role: role ?? 'user', plan: plan ?? 'free' };
 }
 
 /**

@@ -20,6 +20,9 @@ const DEFAULTS = {
   alert_pool_low_threshold:'5',
   gen_temperature:         '',   // empty = use model default
   gen_max_tokens:          '',   // empty = use model default
+  payment_upi_1:           '',
+  payment_upi_2:           '',
+  payment_qr_path:         '',
 };
 
 /**
