@@ -1,4 +1,4 @@
-# Gemini Proxy API — Frontend Developer Guide
+# Coatcard AiMagic API — Frontend Developer Guide
 
 **Base URL:** `http://localhost:3000` (development) · `https://your-domain.com` (production)  
 **Content-Type:** `application/json` for all requests and responses (except `/v1/metrics` and `/v1/generate/stream`)

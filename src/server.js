@@ -50,6 +50,7 @@ export function buildServer() {
       .map(o => o.trim()),
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
+    exposedHeaders: ['Content-Disposition', 'Content-Length'],
     credentials: true,
   });
 
