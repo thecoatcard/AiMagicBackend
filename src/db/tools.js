@@ -15,7 +15,11 @@ export async function ensureToolsIndexes() {
 function serialize(doc) {
   if (!doc) return null;
   const { _id, ...rest } = doc;
-  return { id: _id.toString(), ...rest };
+  return { 
+    id: _id.toString(), 
+    ...rest,
+    file_id: doc.file_id ? doc.file_id.toString() : null 
+  };
 }
 
 /**
@@ -25,7 +29,7 @@ function serialize(doc) {
  * @param {string} data.description
  * @param {string|null} data.icon         — base64 data URL or external image URL
  * @param {'zip'|'external'} data.type
- * @param {string|null} [data.file_path]  — disk path (zip type)
+ * @param {string|null} [data.file_id]    — GridFS file ID (zip type)
  * @param {string|null} [data.file_name]  — original filename (zip type)
  * @param {number|null} [data.file_size]  — bytes (zip type)
  * @param {string|null} [data.external_url] — download URL (external type)
@@ -40,7 +44,7 @@ export async function createTool(data) {
     description:  data.description,
     icon:         data.icon ?? null,
     type:         data.type,
-    file_path:    data.file_path    ?? null,
+    file_id:      data.file_id      ? new ObjectId(data.file_id) : null,
     file_name:    data.file_name    ?? null,
     file_size:    data.file_size    ?? null,
     external_url: data.external_url ?? null,
@@ -91,9 +95,15 @@ export async function updateTool(id, updates) {
   try {
     const db = await getDb();
     const $set = { updated_at: new Date() };
-    const allowed = ['name', 'description', 'icon', 'external_url', 'file_path', 'file_name', 'file_size', 'version', 'tags'];
+    const allowed = ['name', 'description', 'icon', 'external_url', 'file_id', 'file_name', 'file_size', 'version', 'tags'];
     for (const key of allowed) {
-      if (key in updates) $set[key] = updates[key];
+      if (key in updates) {
+        if (key === 'file_id' && updates[key]) {
+          $set[key] = new ObjectId(updates[key]);
+        } else {
+          $set[key] = updates[key];
+        }
+      }
     }
     const result = await db.collection('tools').findOneAndUpdate(
       { _id: new ObjectId(id) },
@@ -125,6 +135,14 @@ export async function toggleToolActive(id) {
 export async function deleteTool(id) {
   try {
     const db = await getDb();
+    const doc = await db.collection('tools').findOne({ _id: new ObjectId(id) });
+    
+    if (doc?.file_id) {
+      const { getToolsBucket } = await import('./gridfs.js');
+      const bucket = await getToolsBucket();
+      try { await bucket.delete(doc.file_id); } catch {}
+    }
+
     const result = await db.collection('tools').deleteOne({ _id: new ObjectId(id) });
     return result.deletedCount > 0;
   } catch {

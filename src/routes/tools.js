@@ -1,4 +1,5 @@
 import { createReadStream, existsSync } from 'fs';
+import { getToolsBucket } from '../db/gridfs.js';
 import { getTool, listTools, incrementDownloadCount } from '../db/tools.js';
 
 export async function toolsRoutes(fastify) {
@@ -72,18 +73,30 @@ export async function toolsRoutes(fastify) {
       return reply.redirect(302, tool.external_url);
     }
 
-    // ZIP type — stream file from disk
-    if (!tool.file_path || !existsSync(tool.file_path)) {
-      reply.status(404);
-      return { error: 'Tool file not found on server', code: 'FILE_NOT_FOUND' };
-    }
-
+    // ZIP type — stream file
     const filename = tool.file_name ?? `${tool.name.replace(/\s+/g, '_')}.zip`;
     reply.header('Content-Type', 'application/zip');
     reply.header('Content-Disposition', `attachment; filename="${filename}"`);
     if (tool.file_size) {
       reply.header('Content-Length', tool.file_size);
     }
-    return reply.send(createReadStream(tool.file_path));
+
+    if (tool.file_id) {
+      // Stream from GridFS (New implementation)
+      const bucket = await getToolsBucket();
+      try {
+        const downloadStream = bucket.openDownloadStream(tool.file_id);
+        return reply.send(downloadStream);
+      } catch (err) {
+        reply.status(404);
+        return { error: 'Tool file not found in database', code: 'FILE_NOT_FOUND' };
+      }
+    } else if (tool.file_path && existsSync(tool.file_path)) {
+      // Stream from disk (Legacy implementation)
+      return reply.send(createReadStream(tool.file_path));
+    } else {
+      reply.status(404);
+      return { error: 'Tool file not found on server', code: 'FILE_NOT_FOUND' };
+    }
   });
 }

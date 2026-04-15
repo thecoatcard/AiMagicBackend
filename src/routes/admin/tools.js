@@ -1,6 +1,5 @@
-import { createWriteStream, existsSync, mkdirSync, unlinkSync } from 'fs';
-import { join, extname } from 'path';
-import { randomUUID } from 'crypto';
+import { extname } from 'path';
+import { getToolsBucket } from '../../db/gridfs.js';
 import {
   createTool,
   getTool,
@@ -10,72 +9,54 @@ import {
 } from '../../db/tools.js';
 import { writeAuditLog } from '../../db/auditLog.js';
 
-const UPLOADS_DIR = join(process.cwd(), 'uploads', 'tools');
-
-// Ensure the upload directory exists on first use
-function ensureUploadsDir() {
-  if (!existsSync(UPLOADS_DIR)) {
-    mkdirSync(UPLOADS_DIR, { recursive: true });
-  }
-}
-
 export async function adminToolsRoutes(fastify) {
   // ── POST /v1/admin/tools — create a tool ────────────────────────────────────
-  // Supports two content types:
-  //   1. multipart/form-data  — fields: name, description, icon, version, tags (JSON array string),
-  //                             file attachment (zip)
-  //   2. application/json     — same fields + external_url (no file)
   fastify.post('/v1/admin/tools', async (request, reply) => {
     let toolData;
 
     if (request.isMultipart) {
       // ── Multipart upload path ──
-      ensureUploadsDir();
-
       const parts = request.parts();
       const fields = {};
-      let savedFilePath = null;
+      let savedFileId = null;
       let savedFileName = null;
       let savedFileSize = 0;
 
       for await (const part of parts) {
         if (part.type === 'file') {
-          const ext = extname(part.filename).toLowerCase();
+          savedFileName = part.filename;
+          const ext = extname(savedFileName).toLowerCase();
           if (ext !== '.zip') {
             reply.status(400);
             return { error: 'Only .zip files are allowed', code: 'INVALID_FILE_TYPE' };
           }
-          const uniqueName = `${randomUUID()}${ext}`;
-          savedFilePath = join(UPLOADS_DIR, uniqueName);
-          savedFileName = part.filename;
 
-          let size = 0;
-          const writeStream = createWriteStream(savedFilePath);
-          for await (const chunk of part.file) {
-            size += chunk.length;
-            if (size > 100 * 1024 * 1024) {
-              writeStream.destroy();
-              try { unlinkSync(savedFilePath); } catch {}
-              reply.status(413);
-              return { error: 'File exceeds 100 MB limit', code: 'FILE_TOO_LARGE' };
-            }
-            writeStream.write(chunk);
-          }
-          await new Promise((res, rej) => {
-            writeStream.end(err => (err ? rej(err) : res()));
+          const bucket = await getToolsBucket();
+          const uploadStream = bucket.openUploadStream(savedFileName, {
+            contentType: 'application/zip',
           });
-          savedFileSize = size;
+
+          await new Promise((resolve, reject) => {
+            part.file.pipe(uploadStream);
+            uploadStream.on('finish', resolve);
+            uploadStream.on('error', reject);
+          });
+
+          savedFileId = uploadStream.id;
+          savedFileSize = uploadStream.length;
         } else {
           fields[part.fieldname] = part.value;
         }
       }
 
-      if (!savedFilePath) {
+      if (!savedFileId) {
         reply.status(400);
         return { error: 'A zip file attachment is required for zip-type tools', code: 'MISSING_FILE' };
       }
       if (!fields.name || !fields.description) {
-        try { unlinkSync(savedFilePath); } catch {}
+        // Cleanup GridFS if metadata is missing
+        const bucket = await getToolsBucket();
+        try { await bucket.delete(savedFileId); } catch {}
         reply.status(400);
         return { error: 'name and description are required', code: 'MISSING_FIELDS' };
       }
@@ -87,7 +68,7 @@ export async function adminToolsRoutes(fastify) {
         version:     fields.version     ?? null,
         tags:        fields.tags ? JSON.parse(fields.tags) : [],
         type:        'zip',
-        file_path:   savedFilePath,
+        file_id:     savedFileId.toString(),
         file_name:   savedFileName,
         file_size:   savedFileSize,
         created_by:  request.user.email,
@@ -174,17 +155,14 @@ export async function adminToolsRoutes(fastify) {
 
   // ── DELETE /v1/admin/tools/:id — delete tool ────────────────────────────────
   fastify.delete('/v1/admin/tools/:id', async (request, reply) => {
-    // Fetch first so we can clean up the file
+    // Fetch first so we can verify existence
     const tool = await getTool(request.params.id);
     if (!tool) {
       reply.status(404);
       return { error: 'Tool not found', id: request.params.id };
     }
 
-    if (tool.type === 'zip' && tool.file_path) {
-      try { unlinkSync(tool.file_path); } catch {}
-    }
-
+    // deleteTool helper already cleans up GridFS file_id
     await deleteTool(request.params.id);
     writeAuditLog({ actorEmail: request.user.email, action: 'delete_tool', meta: { toolId: tool.id, name: tool.name } });
     reply.status(204);
