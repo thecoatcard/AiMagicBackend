@@ -13,7 +13,16 @@ export async function sendEmail(to, template, data = {}) {
     return;
   }
 
-  const url = config.frontendEmailUrl.replace(/([^:])\/\//g, '$1/').replace(/\/$/, '') + (config.frontendEmailUrl.endsWith('/api/email/send') ? '' : '/api/email/send');
+  let url;
+  try {
+    // Extract origin to avoid issues if user provides a URL with a path (e.g., /login)
+    const base = new URL(config.frontendEmailUrl).origin;
+    url = `${base}/api/email/send`;
+  } catch (e) {
+    // Fallback if URL parsing fails (e.g. if it's just a hostname)
+    url = config.frontendEmailUrl.replace(/\/$/, '') + '/api/email/send';
+  }
+
 
   try {
     const response = await fetch(url, {
