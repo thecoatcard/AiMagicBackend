@@ -84,19 +84,9 @@ export async function adminAlertsRoutes(fastify) {
       return { error: 'OWNER_EMAIL not configured — cannot send test email' };
     }
     try {
-      await sendEmail(config.ownerEmail, {
-        subject: 'Test Alert — Gemini Proxy Admin',
-        html: `
-          <div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:24px">
-            <h2 style="color:#1d4ed8">Test Alert</h2>
-            <p>This is a test notification sent from the admin panel by <strong>${request.user.email}</strong>.</p>
-            <p style="color:#16a34a"><strong>Email delivery is working correctly.</strong></p>
-            <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0">
-            <p style="color:#6b7280;font-size:12px">Gemini Proxy Admin</p>
-          </div>
-        `,
-      });
+      await sendEmail(config.ownerEmail, 'test', { senderEmail: request.user.email });
       writeAuditLog({ actorEmail: request.user.email, action: 'test_email_sent', meta: { to: config.ownerEmail } });
+
       return { sent: true, to: config.ownerEmail };
     } catch (err) {
       reply.status(502);
