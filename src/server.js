@@ -1,4 +1,5 @@
 import Fastify from 'fastify';
+import { mkdirSync } from 'fs';
 import sensible from '@fastify/sensible';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
@@ -27,6 +28,9 @@ import { adminAuditRoutes } from './routes/admin/audit.js';
 import { adminToolsRoutes } from './routes/admin/tools.js';
 
 export function buildServer() {
+  mkdirSync('uploads/payments', { recursive: true });
+  mkdirSync('uploads/tickets', { recursive: true });
+
   const fastify = Fastify({
     logger: {
       transport: {

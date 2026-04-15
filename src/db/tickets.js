@@ -29,7 +29,7 @@ export async function ensureTicketTextIndex() {
 /**
  * Insert a new ticket. Returns the serialized ticket document.
  */
-export async function createTicket({ userEmail, subject, description, priority = 'medium' }) {
+export async function createTicket({ userEmail, subject, description, priority = 'medium', screenshotPath = null }) {
   const db = await getDb();
   const now = new Date();
   const result = await db.collection('tickets').insertOne({
@@ -38,6 +38,7 @@ export async function createTicket({ userEmail, subject, description, priority =
     description,
     priority,
     status: 'open',
+    screenshot_path: screenshotPath,
     admin_response: null,
     created_at: now,
     updated_at: now,
@@ -170,6 +171,7 @@ function serialize(doc) {
     description:    doc.description,
     priority:       doc.priority,
     status:         doc.status,
+    screenshot_path: doc.screenshot_path ?? null,
     admin_response: doc.admin_response,
     admin_notes:    doc.admin_notes ?? null,
     created_at:     doc.created_at,

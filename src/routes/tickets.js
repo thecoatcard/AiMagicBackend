@@ -15,26 +15,56 @@ import {
   notifyAdminNewTicket,
 } from '../services/notifications.js';
 import { writeAuditLog } from '../db/auditLog.js';
+import { createReadStream, existsSync } from 'fs';
+import { pipeline } from 'stream/promises';
+import { createWriteStream } from 'fs';
+import { join } from 'path';
+import { randomBytes } from 'crypto';
 
 const VALID_STATUSES   = ['open', 'in_progress', 'resolved', 'closed'];
 const VALID_PRIORITIES = ['low', 'medium', 'high'];
 
 export async function ticketsRoutes(fastify) {
   // ── POST /v1/tickets — create a ticket (any authenticated user) ────────────
-  fastify.post('/v1/tickets', {
-    schema: {
-      body: {
-        type: 'object',
-        required: ['subject', 'description'],
-        properties: {
-          subject:     { type: 'string', minLength: 3,  maxLength: 200 },
-          description: { type: 'string', minLength: 10, maxLength: 5000 },
-          priority:    { type: 'string', enum: VALID_PRIORITIES },
-        },
-      },
-    },
-  }, async (request, reply) => {
-    const { subject, description, priority } = request.body;
+  fastify.post('/v1/tickets', async (request, reply) => {
+    if (!request.isMultipart()) {
+      reply.status(400);
+      return { error: 'Request must be multipart/form-data', code: 'BAD_REQUEST' };
+    }
+
+    let subject, description, priority = 'medium', screenshotPath = null;
+    const parts = request.parts();
+
+    for await (const part of parts) {
+      if (part.type === 'file') {
+        if (part.fieldname === 'screenshot') {
+          const ext = part.filename.split('.').pop().toLowerCase();
+          const allowed = ['jpg', 'jpeg', 'png', 'webp'];
+          if (!allowed.includes(ext)) {
+            reply.status(400);
+            return { error: 'Invalid file type. Only JPG, PNG, and WebP are allowed.', code: 'INVALID_FILE' };
+          }
+          const fname = `${randomBytes(16).toString('hex')}.${ext}`;
+          const fpath = join('uploads/tickets', fname);
+          await pipeline(part.file, createWriteStream(fpath));
+          screenshotPath = fpath;
+        }
+      } else {
+        if (part.fieldname === 'subject') subject = part.value;
+        if (part.fieldname === 'description') description = part.value;
+        if (part.fieldname === 'priority') priority = part.value;
+      }
+    }
+
+    if (!subject || subject.length < 3) {
+      reply.status(400);
+      return { error: 'Subject is required (min 3 chars)', code: 'BAD_REQUEST' };
+    }
+    if (!description || description.length < 10) {
+      reply.status(400);
+      return { error: 'Description is required (min 10 chars)', code: 'BAD_REQUEST' };
+    }
+
     let ticket;
     try {
       ticket = await createTicket({
@@ -42,12 +72,13 @@ export async function ticketsRoutes(fastify) {
         subject,
         description,
         priority,
+        screenshotPath,
       });
     } catch (err) {
       reply.status(503);
       return { error: 'Database unavailable', code: 'DB_UNAVAILABLE' };
     }
-    // Notify user that their ticket was received, and alert the admin
+
     notifyTicketCreated(request.user.email, {
       ticketId:    ticket.id,
       subject,
@@ -61,8 +92,40 @@ export async function ticketsRoutes(fastify) {
       priority:    ticket.priority,
       description,
     });
+
     reply.status(201);
     return ticket;
+  });
+
+  // ── GET /v1/tickets/:id/screenshot — serve ticket screenshot ────────────────
+  fastify.get('/v1/tickets/:id/screenshot', async (request, reply) => {
+    const ticket = await getTicketById(request.params.id);
+    if (!ticket || !ticket.screenshot_path) {
+      reply.status(404);
+      return { error: 'Screenshot not found', code: 'NOT_FOUND' };
+    }
+
+    // Auth check: Admin or owner of the ticket
+    const isAdmin = request.user.role === 'admin' || request.user.role === 'owner';
+    if (!isAdmin && ticket.user_email !== request.user.email) {
+      reply.status(403);
+      return { error: 'Forbidden', code: 'FORBIDDEN' };
+    }
+
+    if (!existsSync(ticket.screenshot_path)) {
+      reply.status(404);
+      return { error: 'Screenshot file missing', code: 'FILE_MISSING' };
+    }
+
+    const ext = ticket.screenshot_path.split('.').pop().toLowerCase();
+    const mimeTypesMapping = {
+      png: 'image/png',
+      jpg: 'image/jpeg',
+      jpeg: 'image/jpeg',
+      webp: 'image/webp',
+    };
+    reply.header('Content-Type', mimeTypesMapping[ext] || 'application/octet-stream');
+    return reply.send(createReadStream(ticket.screenshot_path));
   });
 
   // ── GET /v1/tickets/stats — ticket statistics (admin only) ───────────────
