@@ -9,6 +9,7 @@ export async function systemRoutes(fastify) {
       upi_1: cfg.payment_upi_1 || '',
       upi_2: cfg.payment_upi_2 || '',
       has_qr: !!cfg.payment_qr_path,
+      qr_id: cfg.payment_qr_path ? cfg.payment_qr_path.split(/[\\/]/).pop() : null,
     };
   });
 
