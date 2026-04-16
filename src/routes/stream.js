@@ -102,6 +102,8 @@ export async function streamRoutes(fastify) {
       let result;
       try {
         result = await streamGenerateContent(key, currentModel, prompt ?? '', options);
+        // Prevent "Unhandled 'error' event" crash if the stream is destroyed or aborted
+        result.bodyStream?.on('error', () => {});
       } catch (err) {
         await returnKey(key);
 

@@ -16,18 +16,19 @@
 7. [Batch Processing](#7-batch-processing)
 8. [User Management](#8-user-management)
 9. [Support Tickets](#9-support-tickets)
-10. [Tools](#10-tools)
+10. [Tools Marketplace](#10-tools-marketplace)
 11. [Analytics & Logs](#11-analytics--logs)
 12. [Admin — Key Management](#12-admin--key-management)
-13. [Admin — Model Health](#13-admin--model-health)
+13. [Admin — Model Config & Health](#13-admin--model-config--health)
 14. [Admin — Queue Management](#14-admin--queue-management)
 15. [Admin — System Control](#15-admin--system-control)
 16. [Admin — Alerts & Notifications](#16-admin--alerts--notifications)
 17. [Admin — Health Dashboard](#17-admin--health-dashboard)
 18. [Admin — Audit Log](#18-admin--audit-log)
-19. [Infrastructure](#19-infrastructure)
-20. [Error Reference](#20-error-reference)
-21. [Full Flow Examples](#21-full-flow-examples)
+19. [Admin — Batch Tools](#19-admin--batch-tools)
+20. [Infrastructure](#20-infrastructure)
+21. [Error Reference](#21-error-reference)
+22. [Tester Use Cases & Verification](#22-tester-use-cases--verification)
 
 ---
 
@@ -791,6 +792,7 @@ List all registered users with optional filtering and search.
 **Response `200`:**
 ```json
 {
+  "total": 124,
   "users": [
     {
       "email":      "alice@example.com",
@@ -798,6 +800,108 @@ List all registered users with optional filtering and search.
       "plan":       "free",
       "status":     "active",
       "limits":     { "max_requests_per_min": 60 },
+      "created_at": "2025-06-01T..."
+    }
+  ]
+}
+```
+
+---
+
+### `GET /v1/users/stats`
+
+Aggregate metrics across all users.
+
+**Authentication required. Admin only.**
+
+**Response `200`:**
+```json
+{
+  "total": 124,
+  "by_role": { "user": 120, "admin": 3, "owner": 1 },
+  "by_plan": { "free": 110, "premium": 14 },
+  "status":  { "active": 122, "blocked": 2 }
+}
+```
+
+---
+
+### `POST /v1/users/bulk`
+
+Perform actions on multiple users at once.
+
+**Authentication required. Admin only.**
+
+**Request:**
+```json
+{
+  "emails": ["user1@example.com", "user2@example.com"],
+  "action": "block", // "block", "unblock", or "set_plan"
+  "plan":   "premium" // required for "set_plan"
+}
+```
+
+---
+
+### `POST /v1/users/:email/impersonate`
+
+Create a short-lived (1h) token to access the API as another user.
+
+**Authentication required. Owner only.**
+
+**Response `200`:**
+```json
+{
+  "token":          "eyJhb...",
+  "expires_in":     "1h",
+  "impersonating": "user@example.com"
+}
+```
+
+---
+
+### `PATCH /v1/users/:email/block`
+
+Manually block a user. Their session is invalidated immediately.
+
+**Authentication required. Admin only.**
+
+---
+
+### `PATCH /v1/users/:email/limits`
+
+Set custom rate limit overrides for a specific user.
+
+**Authentication required. Admin only.**
+
+**Request:**
+```json
+{
+  "max_requests_per_min": 120,
+  "max_requests_per_day": 1000
+}
+```
+
+---
+
+### `PATCH /v1/users/:email/role`
+
+Promote or demote a user.
+
+**Authentication required. Owner only.**
+
+**Request:**
+```json
+{ "role": "admin" } // "user" or "admin"
+```
+
+---
+
+### `DELETE /v1/users/:email`
+
+Permanently remove a user and their data.
+
+**Authentication required. Admin only.**
       "usage":      { "total_requests": 1200 },
       "created_at": "2025-06-01T10:00:00.000Z",
       "last_login": "2025-06-10T14:22:11.000Z"
@@ -1039,20 +1143,27 @@ Create a new support ticket.
 
 **Authentication required. Any role.**
 
-**Request:**
-```json
-{
-  "subject":     "Getting 503 errors frequently",
-  "description": "Since this morning, about 30% of my requests are returning 503 RETRIES_EXHAUSTED.",
-  "priority":    "high"
-}
-```
+**Request:** `multipart/form-data`
 
 | Field | Type | Required | Constraints |
 |---|---|---|---|
 | `subject` | string | ✅ | 3–200 chars |
 | `description` | string | ✅ | 10–5000 chars |
 | `priority` | string | ❌ | `low`, `medium`, `high`. Default: `medium` |
+| `screenshot` | file | ❌ | JPG, PNG, WebP or GIF format (Max 100MB) |
+
+---
+
+### `GET /v1/tickets/:id/screenshot`
+
+Download or view the screenshot attached to a ticket.
+
+**Authentication required.**
+
+- **Users** can only view screenshots for their own tickets.
+- **Admins/owner** can view any attachment.
+
+**Response `200`:** The image file (binary stream).
 
 **Response `201`:**
 ```json
@@ -1892,9 +2003,35 @@ Usage statistics for a specific key (queried by masked key string).
 
 ---
 
-## 13. Admin — Model Health
+## 13. Admin — Model Config & Health
 
-Admin/owner only.
+Admin/owner only. Manage the primary model, fallback chain, and view live health metrics.
+
+### `GET /v1/models/config`
+
+View the primary model and the ordered fallback list.
+
+**Response `200`:**
+```json
+{
+  "primary_model": "gemini-3-flash-preview",
+  "fallback_models": ["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+}
+```
+
+---
+
+### `PATCH /v1/models/config`
+
+Update the primary model or replace the entire fallback chain.
+
+---
+
+### `POST /v1/models/config/fallback`
+
+Add a model to the fallback chain.
+
+---
 
 ### `GET /v1/models`
 
@@ -2331,6 +2468,45 @@ Remove a whitelist rule.
 
 ---
 
+### `PATCH /v1/admin/system/payment`
+
+Update the UPI IDs for manual payments.
+
+**Authentication required. Admin only.**
+
+**Request:**
+```json
+{ "upi_1": "user@upi", "upi_2": "9876543210@paytm" }
+```
+
+---
+
+### `POST /v1/admin/system/payment-qr`
+
+Upload a QR code image for manual payments.
+
+**Authentication required. Admin only.**
+
+**Request:** `multipart/form-data` with an image file.
+
+---
+
+### `GET /v1/admin/system/emails`
+
+View status of email notification toggles.
+
+**Authentication required. Admin only.**
+
+---
+
+### `PATCH /v1/admin/system/emails`
+
+Toggle specific email notifications (Security, Status, Tickets, Quota, Admin Health).
+
+**Authentication required. Admin only.**
+
+---
+
 ## 16. Admin — Alerts & Notifications
 
 Admin/owner only. Manage alert throttles and notification configuration.
@@ -2572,7 +2748,26 @@ Query the audit log with optional filters and pagination.
 
 ---
 
-## 19. Infrastructure
+## 19. Admin — Batch Tools
+
+Admin/owner only. Specialized tools for managing batch jobs.
+
+### `POST /v1/generate/batch`
+
+Submit a large batch of prompts for background processing.
+
+**Response `200`:**
+```json
+{
+  "batch_id": "uuid",
+  "total": 50,
+  "status_url": "/v1/queue/batch/uuid"
+}
+```
+
+---
+
+## 20. Infrastructure
 
 Public — no authentication required.
 
@@ -2849,3 +3044,37 @@ await api.patch('/v1/admin/system/plan-limits', {
 ```
 
 ---
+
+## 22. Tester Use Cases & Verification
+
+This section provides specific scenarios for the QA team to verify system integrity and edge-case handling.
+
+### 1. User Authentication & Session Security
+- **Use Case:** Verify single-device enforcement.
+- **Scenario:** Log in on Device A. Then log in on Device B with the same email.
+- **Expected:** Device A should receive an email about a new login, and its next API request should return `401 session_superseded`.
+
+### 2. AI Generation fallback
+- **Use Case:** Verify model retry logic.
+- **Scenario:** Use a blocked/disabled API key or trigger a 503 from a specific model.
+- **Expected:** The server should automatically retry with a different key or fallback model. Response should contain `retries > 0`.
+
+### 3. Rate Limiting & Quotas
+- **Use Case:** Verify daily quota exhaustion.
+- **Scenario:** Perform requests until the `free` plan limit (default 5) is reached.
+- **Expected:** The 6th request should return `429 DAILY_LIMIT_EXCEEDED` with a `reset_in_seconds` value.
+
+### 4. Admin System Control
+- **Use Case:** Verify Maintenance Mode.
+- **Scenario:** Enable `maintenance_mode` via `PATCH /v1/admin/system`.
+- **Expected:** Non-admin users should get `503 MAINTENANCE_MODE`. Admins should be able to continue using the API.
+
+### 5. Support Ticket Attachments
+- **Use Case:** Verify screenshot upload and retrieval.
+- **Scenario:** Create a ticket with a PNG screenshot. Download it via `/v1/tickets/:id/screenshot`.
+- **Expected:** The download should return the identical binary file with the correct `Content-Type`.
+
+### 6. Tools Marketplace
+- **Use Case:** Verify ZIP download tracking.
+- **Scenario:** Note the current `download_count` for a tool. Download it.
+- **Expected:** The `download_count` should increment by 1.
