@@ -6,6 +6,7 @@
 
 import { getRedis } from './client.js';
 import { PLANS } from '../config/plans.js';
+import { savePersistentConfig, getPersistentConfig } from '../db/config.js';
 
 const CONFIG_KEY = 'system:config';
 
@@ -51,6 +52,7 @@ export async function getAllSystemConfig() {
 
 /**
  * Set one or more system config values (all values stored as strings).
+ * Persists to MongoDB and updates Redis.
  * @param {Record<string, string>} updates
  */
 export async function setSystemConfig(updates) {
@@ -60,7 +62,31 @@ export async function setSystemConfig(updates) {
   }
   if (flat.length > 0) {
     await getRedis().hset(CONFIG_KEY, ...flat);
+    
+    // Persist full state to MongoDB
+    const current = await getAllSystemConfig();
+    await savePersistentConfig('system', current);
   }
+}
+
+/**
+ * Load system configuration from MongoDB into Redis.
+ * Called on server startup.
+ */
+export async function loadSystemConfigFromDb() {
+  const doc = await getPersistentConfig('system');
+  if (doc) {
+    const { _id, updated_at, ...config } = doc;
+    const flat = [];
+    for (const [k, v] of Object.entries(config)) {
+      flat.push(k, String(v));
+    }
+    if (flat.length > 0) {
+      await getRedis().hset(CONFIG_KEY, ...flat);
+    }
+    return true;
+  }
+  return false;
 }
 
 /** Is the system currently in maintenance mode? */
@@ -122,6 +148,9 @@ export async function seedPlanLimitsToRedis() {
       await redis.hset(CONFIG_KEY, key, String(planDef.daily_requests));
     }
   }
+  // Sync the final state up to MongoDB
+  const current = await getAllSystemConfig();
+  await savePersistentConfig('system', current);
 }
 
 /**

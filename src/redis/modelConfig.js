@@ -1,4 +1,5 @@
 import { getRedis } from './client.js';
+import { savePersistentConfig, getPersistentConfig } from '../db/config.js';
 
 const CONFIG_KEY = 'model:config';
 
@@ -50,6 +51,21 @@ export async function updateModelConfig({ primaryModel, fallbackModels } = {}) {
   }
 
   await getRedis().hset(CONFIG_KEY, 'fallback_models', JSON.stringify(models));
+  
+  // Persist to MongoDB
+  await savePersistentConfig('models', { fallback_models: models });
+}
+
+/**
+ * Load model configuration from MongoDB into Redis.
+ */
+export async function loadModelConfigFromDb() {
+  const doc = await getPersistentConfig('models');
+  if (doc && doc.fallback_models) {
+    await getRedis().hset(CONFIG_KEY, 'fallback_models', JSON.stringify(doc.fallback_models));
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -63,6 +79,7 @@ export async function addFallbackModel(model, position = 'end') {
   if (position === 'start') models.unshift(model);
   else models.push(model);
   await getRedis().hset(CONFIG_KEY, 'fallback_models', JSON.stringify(models));
+  await savePersistentConfig('models', { fallback_models: models });
   return { added: true };
 }
 
@@ -75,5 +92,6 @@ export async function removeFallbackModel(model) {
   if (idx === -1) return { removed: false, reason: 'not_found' };
   models.splice(idx, 1);
   await getRedis().hset(CONFIG_KEY, 'fallback_models', JSON.stringify(models));
+  await savePersistentConfig('models', { fallback_models: models });
   return { removed: true };
 }

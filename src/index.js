@@ -12,52 +12,79 @@ import { getQueue } from './queue/index.js';
 import { getRedis } from './redis/client.js';
 import { activeKeysGauge, cooldownKeysGauge, queueSizeGauge, workerActiveGauge } from './metrics/index.js';
 import { notifyAdminQueueBacklog, notifyAdminDailySummary, notifyAdminHighFailureRate } from './services/notifications.js';
-import { seedPlanLimitsToRedis, getFailureRateCount, getSystemConfig } from './redis/systemConfig.js';
-
-// Fallback hardcoded threshold — overridden at runtime by Redis config
-const QUEUE_BACKLOG_THRESHOLD_DEFAULT = parseInt(process.env.QUEUE_BACKLOG_THRESHOLD || '100', 10);
+import { loadSystemConfigFromDb, seedPlanLimitsToRedis, getFailureRateCount, getSystemConfig } from './redis/systemConfig.js';
+import { loadModelConfigFromDb } from './redis/modelConfig.js';
+import { syncApiKeysWithDb, seedKeysFromEnv, restoreExpiredKeys } from './redis/keyPool.js';
 
 const server = buildServer();
 
-// Seed keys from env on startup
-if (config.geminiKeys.length > 0) {
-  await seedKeysFromEnv(config.geminiKeys);
-  server.log.info(`[keys] seeded ${config.geminiKeys.length} key(s) from GEMINI_KEYS`);
-} else {
-  server.log.warn('[keys] GEMINI_KEYS is empty — add keys via POST /v1/keys');
-}
+// ── Startup Initialization Sequence ──────────────────────────────────────────
 
-// Seed plan limits to Redis from code defaults (skips if already set by admin)
-try {
-  await seedPlanLimitsToRedis();
-  server.log.info('[systemConfig] plan limits seeded to Redis');
-} catch (err) {
-  server.log.warn({ err }, '[systemConfig] failed to seed plan limits');
-}
+async function bootstrap() {
+  // 1. Connect to MongoDB (Required for persistence)
+  try {
+    await getDb();
+    server.log.info('[MongoDB] Connected');
 
-// Connect to MongoDB and ensure indexes (non-fatal — server still starts if Mongo is unavailable)
-try {
-  await getDb();
-  await Promise.all([
-    ensureUserIndexes(),
-    ensureTicketIndexes(),
-    ensureTicketTextIndex(),
-    ensureWhitelistIndexes(),
-    ensureAuditLogIndexes(),
-    ensureToolsIndexes(),
-  ]);
-  await ensureOwner(config.ownerEmail);
-  if (config.ownerEmail) {
-    server.log.info(`[owner] ${config.ownerEmail} seeded with role:owner`);
+    // Ensure all critical indexes
+    await Promise.all([
+      ensureUserIndexes(),
+      ensureTicketIndexes(),
+      ensureTicketTextIndex(),
+      ensureWhitelistIndexes(),
+      ensureAuditLogIndexes(),
+      ensureToolsIndexes(),
+    ]);
+    await ensureOwner(config.ownerEmail);
+  } catch (err) {
+    server.log.error({ err }, '[Fatal] Could not connect to MongoDB — persistence disabled');
   }
-  server.log.info('[MongoDB] connected and indexes ensured');
-} catch (err) {
-  server.log.warn({ err }, '[MongoDB] connection failed — logging and DB features disabled');
+
+  // 2. Load System Configuration from MongoDB into Redis
+  try {
+    const systemLoaded = await loadSystemConfigFromDb();
+    if (systemLoaded) {
+      server.log.info('[Bootstrap] System config restored from MongoDB');
+    } else {
+      await seedPlanLimitsToRedis();
+      server.log.info('[Bootstrap] System config initialized with defaults');
+    }
+  } catch (err) {
+    server.log.warn({ err }, '[Bootstrap] Failed to load system config');
+  }
+
+  // 3. Load Model Configuration from MongoDB into Redis
+  try {
+    const modelsLoaded = await loadModelConfigFromDb();
+    if (modelsLoaded) {
+      server.log.info('[Bootstrap] Model config restored from MongoDB');
+    }
+  } catch (err) {
+    server.log.warn({ err }, '[Bootstrap] Failed to load model config');
+  }
+
+  // 4. Sycn API Key Pool from MongoDB
+  try {
+    const keysSynced = await syncApiKeysWithDb();
+    if (keysSynced) {
+      server.log.info('[Bootstrap] API key pool restored from MongoDB');
+    } else if (config.geminiKeys.length > 0) {
+      // Empty database — seed from Env for first-run backward compatibility
+      await seedKeysFromEnv(config.geminiKeys);
+      server.log.info(`[Bootstrap] API key pool seeded from GEMINI_KEYS (${config.geminiKeys.length} keys)`);
+    } else {
+      server.log.warn('[Bootstrap] API key pool is empty');
+    }
+  } catch (err) {
+    server.log.warn({ err }, '[Bootstrap] Failed to sync API keys');
+  }
+
+  // 5. Start BullMQ worker
+  startWorker(config.workerConcurrency);
+  server.log.info(`[Worker] Started with concurrency ${config.workerConcurrency}`);
 }
 
-// Start BullMQ worker
-startWorker(config.workerConcurrency);
-server.log.info(`[worker] started with concurrency ${config.workerConcurrency}`);
+await bootstrap();
 
 // Background job: restore expired cooldown keys + update gauges every 5s
 setInterval(async () => {

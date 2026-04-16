@@ -1,6 +1,7 @@
 import { getRedis } from './client.js';
 import { config } from '../config.js';
 import { notifyAdminKeyPoolLow } from '../services/notifications.js';
+import { upsertApiKey, removeApiKey as removeKeyFromDb, getAllApiKeys } from '../db/apiKeys.js';
 
 const KEY_POOL_LOW_THRESHOLD = parseInt(process.env.KEY_POOL_LOW_THRESHOLD || '5', 10);
 
@@ -34,6 +35,10 @@ export async function cooldownKey(key, ttlMs) {
   const redis = getRedis();
   await redis.lrem(ACTIVE_LIST, 0, key);
   await redis.zadd(COOLDOWN_ZSET, expireAt, key);
+  
+  // Sync to MongoDB
+  await upsertApiKey(key, { status: 'cooldown', cooldownUntil: new Date(expireAt) });
+  
   checkPoolLow(redis).catch(() => {});
 }
 
@@ -44,6 +49,10 @@ export async function disableKey(key) {
   const redis = getRedis();
   await redis.lrem(ACTIVE_LIST, 0, key);
   await redis.zadd(COOLDOWN_ZSET, DISABLED_SCORE, key);
+  
+  // Sync to MongoDB
+  await upsertApiKey(key, { status: 'disabled' });
+  
   checkPoolLow(redis).catch(() => {});
 }
 
@@ -61,6 +70,9 @@ export async function enableKey(key) {
   const redis = getRedis();
   await redis.zrem(COOLDOWN_ZSET, key);
   await redis.lpush(ACTIVE_LIST, key);
+  
+  // Sync to MongoDB
+  await upsertApiKey(key, { status: 'active' });
 }
 
 /**
@@ -84,7 +96,24 @@ export async function addKey(key) {
 
   if (result === 1) return { added: false, reason: 'already_active' };
   if (result === 2) return { added: false, reason: 'in_cooldown' };
+  
+  // Sync to MongoDB
+  await upsertApiKey(key, { status: 'active' });
+  
   return { added: true };
+}
+
+/**
+ * Remove a key from all Redis lists and MongoDB.
+ */
+export async function removeKey(key) {
+  const redis = getRedis();
+  await Promise.all([
+    redis.lrem(ACTIVE_LIST, 0, key),
+    redis.zrem(COOLDOWN_ZSET, key),
+    removeKeyFromDb(key)
+  ]);
+  return { removed: true };
 }
 
 /**
@@ -202,6 +231,37 @@ export async function seedKeysFromEnv(keys) {
   for (const key of keys) {
     await addKey(key);
   }
+}
+
+/**
+ * Load all API keys from MongoDB and rebuild the Redis key pool.
+ */
+export async function syncApiKeysWithDb() {
+  const keys = await getAllApiKeys();
+  if (keys.length === 0) return false;
+
+  const redis = getRedis();
+  const now = Date.now();
+
+  // Clear current lists to avoid duplicates or orphans during rebuild
+  await redis.del(ACTIVE_LIST, COOLDOWN_ZSET);
+
+  for (const k of keys) {
+    if (k.status === 'active') {
+      await redis.rpush(ACTIVE_LIST, k.key);
+    } else if (k.status === 'disabled') {
+      await redis.zadd(COOLDOWN_ZSET, DISABLED_SCORE, k.key);
+    } else if (k.status === 'cooldown' && k.cooldown_until) {
+      const until = new Date(k.cooldown_until).getTime();
+      if (until > now) {
+        await redis.zadd(COOLDOWN_ZSET, until, k.key);
+      } else {
+        // Cooldown expired while server was offline — restore to active
+        await redis.rpush(ACTIVE_LIST, k.key);
+      }
+    }
+  }
+  return true;
 }
 
 function maskKey(key) {
