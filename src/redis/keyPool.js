@@ -20,9 +20,19 @@ export async function getKey() {
 
 /**
  * Return a key to the front of the active pool (LPUSH).
+ * Duplicate-safe: only adds if not already present.
  */
 export async function returnKey(key) {
-  await getRedis().lpush(ACTIVE_LIST, key);
+  const redis = getRedis();
+  const luaScript = `
+    local exists = redis.call('LPOS', KEYS[1], ARGV[1])
+    if exists == false then
+      redis.call('LPUSH', KEYS[1], ARGV[1])
+      return 1
+    end
+    return 0
+  `;
+  await redis.eval(luaScript, 1, ACTIVE_LIST, key);
 }
 
 /**
