@@ -138,7 +138,7 @@ export async function streamRoutes(fastify) {
       }
 
       if (result.status === 503) {
-        result.bodyStream.destroy();
+        result.bodyStream.on('error', () => {}).destroy();
         await returnKey(key);
         await recordFailure(currentModel, '503');
         logError({ type: '503', model: currentModel, key_masked: lastKeyMasked });
@@ -155,14 +155,14 @@ export async function streamRoutes(fastify) {
       }
 
       if (result.status === 401 || result.status === 403) {
-        result.bodyStream.destroy();
+        result.bodyStream.on('error', () => {}).destroy();
         await disableKey(key);
         logError({ type: 'key_invalid', model: currentModel, key_masked: lastKeyMasked, message: `Status ${result.status}: API Key is invalid` });
         continue; // try next key
       }
 
       if (result.status !== 200) {
-        result.bodyStream.destroy();
+        result.bodyStream.on('error', () => {}).destroy();
         await returnKey(key);
         await recordFailure(currentModel, 'other');
         logError({ type: String(result.status), model: currentModel, key_masked: lastKeyMasked });
