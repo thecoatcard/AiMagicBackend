@@ -1,5 +1,4 @@
-import { randomUUID } from 'crypto';
-import { getQueue, getQueueEvents } from '../queue/index.js';
+import { runGenerate } from '../services/orchestrator.js';
 import { checkUserRateLimit } from '../middleware/rateLimiter.js';
 
 // Accepted image MIME types
@@ -94,43 +93,12 @@ export async function generateRoutes(fastify) {
     if (history?.length)                  options.history            = history;
     if (thinkingBudget     !== undefined) options.thinkingBudget     = thinkingBudget;
 
-    const requestId = randomUUID();
-    const queue = getQueue();
-    const queueEvents = getQueueEvents();
+    const result = await runGenerate({ prompt: prompt ?? '', model, options, userEmail: request.user?.email });
 
-    const job = await queue.add(
-      `single-${requestId}`,
-      { prompt: prompt ?? '', model, options, requestId, userEmail: request.user?.email },
-      { jobId: requestId }
-    );
-
-    try {
-      // Wait for the job to complete with a safety timeout (55s)
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('QUEUE_TIMEOUT')), 55000)
-      );
-
-      const result = await Promise.race([
-        job.waitUntilFinished(queueEvents),
-        timeoutPromise
-      ]);
-
-      if (result.error) {
-        reply.status(result.httpStatus ?? 500);
-      }
-      
-      const { httpStatus: _, ...response } = result;
-      return response;
-    } catch (err) {
-      if (err.message === 'QUEUE_TIMEOUT') {
-        reply.status(504).send({ 
-          error: 'Request timed out in queue. The server is currently under high load.', 
-          code: 'QUEUE_TIMEOUT',
-          request_id: requestId
-        });
-        return;
-      }
-      throw err;
+    if (result.error) {
+      reply.status(result.httpStatus ?? 500);
     }
+    const { httpStatus: _, ...response } = result;
+    return response;
   });
 }
