@@ -83,13 +83,14 @@ export function buildServer() {
     instance.register(ticketsRoutes);
     // tools — active tools visible to all; download tracked; admin CRUD inline
     instance.register(toolsRoutes);
+    // models — listing available models is public for chat settings; admin routes protected inline
+    instance.register(modelsRoutes);
 
     // ── Admin-only endpoints ─────────────────────────────────────────────────
     instance.register(async (admin) => {
       admin.addHook('preHandler', requireAdmin);
 
       admin.register(keysRoutes);
-      admin.register(modelsRoutes);
       admin.register(queueRoutes);
       admin.register(metricsRoutes);
       admin.register(debugRoutes);
