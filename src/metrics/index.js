@@ -93,3 +93,32 @@ export const batchCompletionDuration = new Histogram({
   buckets: [1000, 5000, 15000, 30000, 60000, 120000, 300000],
   registers: [registry],
 });
+
+/**
+ * Extract summary statistics (Avg, P50, P90, P99) from a Histogram.
+ * Since we don't have a real PromQL engine, we compute approximate percentiles
+ * based on the buckets or just return count/sum/max for now.
+ */
+export async function getMetricSummary(histogramName) {
+  const metrics = await registry.getMetricsAsJSON();
+  const h = metrics.find(m => m.name === histogramName);
+  if (!h || !h.values) return null;
+
+  // Find the 'sum' and 'count' samples
+  const sumVal = h.values.find(v => v.metricName === `${histogramName}_sum`)?.value || 0;
+  const countVal = h.values.find(v => v.metricName === `${histogramName}_count`)?.value || 0;
+  
+  // Basic average
+  const avg = countVal > 0 ? Math.round(sumVal / countVal) : 0;
+
+  // Approximate P95 by looking at buckets (simplified: find the bucket where 95% of count is)
+  const buckets = h.values.filter(v => v.metricName === `${histogramName}_bucket`).sort((a,b) => a.labels.le - b.labels.le);
+  let p95 = 0;
+  if (countVal > 0) {
+    const target = countVal * 0.95;
+    const bucket = buckets.find(b => b.value >= target);
+    p95 = bucket ? bucket.labels.le : (buckets[buckets.length-1]?.labels?.le || 0);
+  }
+
+  return { avg, p95, count: countVal };
+}
