@@ -7,13 +7,15 @@ const GEMINI_BASE = 'https://generativelanguage.googleapis.com';
 const pool = new Pool(GEMINI_BASE, {
   connections: 100, // Increased for higher concurrency
   pipelining: 0,
+  headersTimeout: config.requestTimeoutMs,
+  bodyTimeout: config.requestTimeoutMs,
 });
 
 /**
  * Call the Gemini generateContent API.
  *
  * @param {string} key     - API key
- * @param {string} model   - e.g. "gemini-2.5-flash"
+ * @param {string} model   - e.g. "gemini-3.1-flash-lite-preview"
  * @param {string} prompt  - user prompt text
  * @param {object} options - optional overrides (temperature, maxOutputTokens, etc.)
  * @returns {{ status: number, data: object, latencyMs: number }}

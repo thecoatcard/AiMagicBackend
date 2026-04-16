@@ -6,10 +6,10 @@ const CONFIG_KEY = 'model:config';
 // Default fallback chain — most capable to lightest.
 // Used when no admin override is stored in Redis.
 export const DEFAULT_FALLBACK_MODELS = [
+  'gemini-3.1-flash-lite-preview',
   'gemini-3-flash-preview',
   'gemini-2.5-flash',
   'gemini-2.5-flash-lite',
-  'gemini-3.1-flash-lite-preview',
 ];
 
 /**
