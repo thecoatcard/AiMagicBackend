@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { getQueue } from '../queue/index.js';
 import { checkBatchRateLimit } from '../middleware/rateLimiter.js';
+import { createBatch } from '../db/batches.js';
 
 export async function batchRoutes(fastify) {
   fastify.post('/v1/generate/batch', {
@@ -31,46 +32,30 @@ export async function batchRoutes(fastify) {
     const batchId = randomUUID();
     const queue = getQueue();
 
-    const jobs = await Promise.all(
-      prompts.map((prompt, i) => {
-        const requestId = randomUUID();
-        return queue.add(
-          `batch-${batchId}-${i}`,
-          { prompt, model, options, requestId, batchId, prompt_index: i, userEmail: request.user?.email },
-          { jobId: requestId }
-        ).then(job => ({ job_id: job.id, request_id: requestId, prompt_index: i }));
-      })
-    );
+    const jobs = prompts.map((prompt, i) => {
+      const requestId = randomUUID();
+      return queue.add(
+        `batch-${batchId}-${i}`,
+        { prompt, model, options, requestId, batchId, prompt_index: i, userEmail: request.user?.email },
+        { jobId: requestId }
+      ).then(job => ({ job_id: job.id, request_id: requestId, prompt_index: i }));
+    });
+
+    const results = await Promise.all(jobs);
+    
+    // Persist batch metadata to MongoDB for fast, secure lookup
+    await createBatch(batchId, {
+      jobIds: results.map(j => j.job_id),
+      userEmail: request.user?.email,
+      total: results.length
+    });
 
     return {
       batch_id: batchId,
-      total: jobs.length,
-      jobs,
+      total: results.length,
+      jobs: results,
       status_url: `/v1/queue/batch/${batchId}`,
     };
   });
 
-  // Poll result for a single job
-  fastify.get('/v1/generate/batch/:jobId', async (request, reply) => {
-    const { jobId } = request.params;
-    const queue = getQueue();
-    const job = await queue.getJob(jobId);
-
-    if (!job) {
-      reply.status(404);
-      return { error: 'Job not found', job_id: jobId };
-    }
-
-    const state = await job.getState();
-    const response = { job_id: jobId, state };
-
-    if (state === 'completed') {
-      response.result = job.returnvalue;
-    } else if (state === 'failed') {
-      response.error = job.failedReason;
-      response.attempts = job.attemptsMade;
-    }
-
-    return response;
-  });
 }

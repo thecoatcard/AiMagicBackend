@@ -5,7 +5,7 @@ const GEMINI_BASE = 'https://generativelanguage.googleapis.com';
 
 // Shared connection pool — reuses TCP connections across requests
 const pool = new Pool(GEMINI_BASE, {
-  connections: 50,
+  connections: 100, // Increased for higher concurrency
   pipelining: 0,
 });
 
@@ -27,8 +27,11 @@ export async function generateContent(key, model, prompt, options = {}) {
   try {
     ({ statusCode, body: resBody } = await pool.request({
       method: 'POST',
-      path: `/v1beta/models/${model}:generateContent?key=${key}`,
-      headers: { 'content-type': 'application/json' },
+      path: `/v1beta/models/${model}:generateContent`,
+      headers: { 
+        'content-type': 'application/json',
+        'x-goog-api-key': key 
+      },
       body,
       signal: AbortSignal.timeout(config.requestTimeoutMs),
     }));
@@ -41,14 +44,14 @@ export async function generateContent(key, model, prompt, options = {}) {
     throw err;
   }
 
-  let data;
   try {
-    data = await resBody.json();
+    const rawData = await resBody.json();
+    return { status: statusCode, data: rawData, latencyMs: Date.now() - start };
   } catch {
-    // Non-JSON upstream response (e.g. HTML error page from a proxy)
-    data = {};
+    // Non-JSON upstream response — ensure body is drained before returning
+    await resBody.dump();
+    return { status: statusCode, data: {}, latencyMs: Date.now() - start };
   }
-  return { status: statusCode, data, latencyMs: Date.now() - start };
 }
 
 /**
@@ -65,8 +68,11 @@ export async function streamGenerateContent(key, model, prompt, options = {}) {
   try {
     ({ statusCode, body: bodyStream } = await pool.request({
       method: 'POST',
-      path: `/v1beta/models/${model}:streamGenerateContent?key=${key}&alt=sse`,
-      headers: { 'content-type': 'application/json' },
+      path: `/v1beta/models/${model}:streamGenerateContent?alt=sse`,
+      headers: { 
+        'content-type': 'application/json',
+        'x-goog-api-key': key
+      },
       body,
       signal: AbortSignal.timeout(config.requestTimeoutMs),
     }));

@@ -79,3 +79,17 @@ export const workerActiveGauge = new Gauge({
   help: 'Number of jobs currently being processed by workers',
   registers: [registry],
 });
+
+export const queueWaitDuration = new Histogram({
+  name: 'gemini_queue_wait_ms',
+  help: 'Time spent in queue before processing starts',
+  buckets: [100, 500, 1000, 2500, 5000, 10000, 30000, 60000],
+  registers: [registry],
+});
+
+export const batchCompletionDuration = new Histogram({
+  name: 'gemini_batch_completion_ms',
+  help: 'Total time to complete an entire batch of jobs',
+  buckets: [1000, 5000, 15000, 30000, 60000, 120000, 300000],
+  registers: [registry],
+});

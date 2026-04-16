@@ -18,11 +18,26 @@ export function getQueue() {
   if (!_queue) {
     _queue = new Queue(QUEUE_NAME, {
       connection: makeRedisConnection(),
+      settings: {
+        backoffStrategies: {
+          jitter: (attemptsMade) => {
+            const delay = Math.pow(2, attemptsMade - 1) * 1000;
+            const jitter = Math.floor(Math.random() * 1000);
+            return delay + jitter;
+          }
+        }
+      },
       defaultJobOptions: {
         attempts: config.maxRetries,
-        backoff: { type: 'exponential', delay: 1000 },
-        removeOnComplete: { count: 500 },
-        removeOnFail: { count: 200 },
+        backoff: { type: 'jitter' },
+        removeOnComplete: { 
+          age: 1800, // keep for 30 minutes
+          count: 1000 
+        },
+        removeOnFail: { 
+          age: 86400, // keep for 24 hours
+          count: 500 
+        },
       },
     });
   }

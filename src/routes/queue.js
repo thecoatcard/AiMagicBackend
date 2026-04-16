@@ -1,4 +1,5 @@
 import { getQueue } from '../queue/index.js';
+import { getBatch } from '../db/batches.js';
 
 export async function queueRoutes(fastify) {
   // GET /v1/queue/status — queue health and counts
@@ -16,22 +17,34 @@ export async function queueRoutes(fastify) {
     const { batchId } = request.params;
     const queue = getQueue();
 
-    // Jobs are named batch-<batchId>-<index>; fetch by jobId prefix via getJobs.
-    // Pass explicit start=0, end=-1 to retrieve all jobs, not just the default page.
-    const allJobs = await queue.getJobs(['active', 'waiting', 'completed', 'failed', 'delayed'], 0, -1);
-    const batchJobs = allJobs.filter(j => j.data?.batchId === batchId);
+    let batch;
+    try {
+      // Validate ownership / exists in MongoDB
+      batch = await getBatch(batchId, request.user?.email, request.user?.role === 'owner');
+    } catch (err) {
+      if (err.code === 'FORBIDDEN') {
+        reply.status(403);
+        return { error: 'Forbidden', code: 'FORBIDDEN' };
+      }
+      throw err;
+    }
 
-    if (batchJobs.length === 0) {
+    if (!batch) {
       reply.status(404);
       return { error: 'Batch not found', batch_id: batchId };
     }
 
+    // Optimization: only fetch the specific jobs listed in the batch
     const jobs = await Promise.all(
-      batchJobs.map(async (job) => {
+      batch.job_ids.map(async (jobId, i) => {
+        const job = await queue.getJob(jobId);
+        if (!job) {
+          return { job_id: jobId, prompt_index: i, state: 'deleted', error: 'Job result expired' };
+        }
         const state = await job.getState();
         return {
-          job_id: job.id,
-          prompt_index: job.data.prompt_index,
+          job_id: jobId,
+          prompt_index: job.data?.prompt_index ?? i,
           state,
           result: state === 'completed' ? job.returnvalue : undefined,
           error:  state === 'failed' ? job.failedReason : undefined,
@@ -44,10 +57,10 @@ export async function queueRoutes(fastify) {
 
     return {
       batch_id: batchId,
-      total: jobs.length,
+      total: batch.total,
       completed: done,
       failed,
-      pending: jobs.length - done - failed,
+      pending: Math.max(0, batch.total - done - failed),
       jobs,
     };
   });

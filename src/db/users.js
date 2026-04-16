@@ -234,8 +234,22 @@ export async function bulkUpdateUsers(emails, update) {
 
 /**
  * Ensure indexes exist on the users collection.
+ * Includes a case-insensitive unique index on email.
  */
 export async function ensureUserIndexes() {
   const db = await getDb();
-  await db.collection('users').createIndex({ email: 1 }, { unique: true });
+  const col = db.collection('users');
+  
+  // Standard unique index
+  await col.createIndex({ email: 1 }, { unique: true });
+
+  // Case-insensitive index for fast Admin searches
+  // Collation strength 2 = ignore case
+  await col.createIndex(
+    { email: 1 },
+    { 
+      name: 'email_case_insensitive',
+      collation: { locale: 'en', strength: 2 } 
+    }
+  );
 }

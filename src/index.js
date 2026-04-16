@@ -85,6 +85,33 @@ async function bootstrap() {
 
 await bootstrap();
 
+// ── Graceful Shutdown ────────────────────────────────────────────────────────
+
+const handleShutdown = async (signal) => {
+  server.log.info(`[OS] Received ${signal} — starting graceful shutdown...`);
+  
+  // 1. Stop taking NEW HTTP requests first
+  await server.close();
+  server.log.info('[Server] HTTP listener closed');
+
+  // 2. Stop the worker (waits for active jobs to finish)
+  await import('./queue/worker.js').then(m => m.stopWorker());
+
+  // 3. Close Redis and MongoDB connections
+  const redis = getRedis();
+  await redis.quit();
+  server.log.info('[Redis] Connection closed');
+
+  process.exit(0);
+};
+
+process.on('SIGTERM', () => handleShutdown('SIGTERM'));
+process.on('SIGINT',  () => handleShutdown('SIGINT'));
+
+process.on('unhandledRejection', (reason, promise) => {
+  server.log.error({ promise, reason }, '[Fatal] Unhandled Rejection at Promise');
+});
+
 // Background job: restore expired cooldown keys + update gauges every 5s
 setInterval(async () => {
   try {
