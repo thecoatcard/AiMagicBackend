@@ -1,6 +1,5 @@
 import { config } from './config.js';
 import { buildServer } from './server.js';
-import { seedKeysFromEnv, restoreExpiredKeys } from './redis/keyPool.js';
 import { getDb } from './db/client.js';
 import { ensureUserIndexes, ensureOwner } from './db/users.js';
 import { ensureTicketIndexes, ensureTicketTextIndex } from './db/tickets.js';
