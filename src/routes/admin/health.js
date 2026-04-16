@@ -3,7 +3,7 @@ import { getRedis } from '../../redis/client.js';
 import { getPoolStats } from '../../redis/keyPool.js';
 import { getQueue } from '../../queue/index.js';
 import { getAllSystemConfig, getFailureRateCount } from '../../redis/systemConfig.js';
-import { getMetricSummary } from '../../metrics/index.js';
+import { getMetricSummary, activeKeysGauge, cooldownKeysGauge, queueSizeGauge, workerActiveGauge } from '../../metrics/index.js';
 import { config as nodeConfig } from '../../config.js';
 
 export async function adminHealthRoutes(fastify) {
@@ -34,6 +34,22 @@ export async function adminHealthRoutes(fastify) {
     const threshold = parseInt(cfg.alert_failure_threshold, 10) || 10;
     const activeJobs = queueResult.status === 'fulfilled' ? queueResult.value.active : 0;
     const concurrency = nodeConfig.workerConcurrency || 1;
+
+    // --- Sync Gauges for Real-time Monitoring ---
+    if (poolResult.status === 'fulfilled') {
+      activeKeysGauge.set(poolResult.value.active);
+      cooldownKeysGauge.set(poolResult.value.cooldown + poolResult.value.disabled);
+    }
+    if (queueResult.status === 'fulfilled') {
+      const q = queueResult.value;
+      queueSizeGauge.set({ state: 'waiting' }, q.waiting);
+      queueSizeGauge.set({ state: 'active' }, q.active);
+      queueSizeGauge.set({ state: 'completed' }, q.completed);
+      queueSizeGauge.set({ state: 'failed' }, q.failed);
+      queueSizeGauge.set({ state: 'delayed' }, q.delayed);
+      workerActiveGauge.set(q.active);
+    }
+    // --------------------------------------------
 
     // Determine System Pulse
     let pulse = 'healthy';

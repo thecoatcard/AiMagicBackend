@@ -8,6 +8,14 @@ import { logRequest, logError } from '../db/logger.js';
 import { checkUserRateLimit } from '../middleware/rateLimiter.js';
 import { notifyAdminNoKeys } from '../services/notifications.js';
 import { imagesSchema, historySchema } from './generate.js';
+import {
+  requestsTotal,
+  requestDuration,
+  retriesTotal,
+  keyCooldownsTotal,
+  model503Total,
+  modelTimeoutsTotal,
+} from '../metrics/index.js';
 
 function maskKey(key) {
   if (!key || key.length <= 8) return '****';
@@ -84,6 +92,7 @@ export async function streamRoutes(fastify) {
       const key = await getKey();
       if (!key) {
         logRequest({ request_id: requestId, model: currentModel, api_key_masked: lastKeyMasked, latency_ms: 0, status: 'error', retries, prompt_length: promptLength, user_email: userEmail });
+        requestsTotal.inc({ model: currentModel ?? 'unknown', status: 'no_keys' });
         notifyAdminNoKeys();
         reply.status(503);
         return { error: 'No API keys available', code: 'NO_KEYS', request_id: requestId };
@@ -99,6 +108,7 @@ export async function streamRoutes(fastify) {
         if (err.code === 'TIMEOUT') {
           await recordFailure(currentModel, 'timeout');
           logError({ type: 'timeout', model: currentModel, key_masked: lastKeyMasked, message: err.message, user_email: userEmail });
+          modelTimeoutsTotal.inc({ model: currentModel });
 
           // Fall back to next lighter model — same logic as orchestrator.js
           if (fallbackIndex === -1) {
@@ -114,6 +124,7 @@ export async function streamRoutes(fastify) {
 
         logError({ type: 'other', model: currentModel, key_masked: lastKeyMasked, message: err.message });
         logRequest({ request_id: requestId, model: currentModel, api_key_masked: lastKeyMasked, latency_ms: 0, status: 'error', retries, prompt_length: promptLength, user_email: userEmail });
+        requestsTotal.inc({ model: currentModel, status: 'error' });
         reply.status(502);
         return { error: err.message, code: 'UPSTREAM_ERROR', request_id: requestId };
       }
@@ -121,6 +132,7 @@ export async function streamRoutes(fastify) {
       if (result.status === 429) {
         result.bodyStream.destroy();
         logError({ type: '429', model: currentModel, key_masked: lastKeyMasked });
+        keyCooldownsTotal.inc();
         await cooldownKey(key, config.cooldownMs);
         continue; // same model, rotate key
       }
@@ -130,6 +142,7 @@ export async function streamRoutes(fastify) {
         await returnKey(key);
         await recordFailure(currentModel, '503');
         logError({ type: '503', model: currentModel, key_masked: lastKeyMasked });
+        model503Total.inc({ model: currentModel });
 
         const remaining = fallbackIndex === -1
           ? fallbackModels
@@ -147,6 +160,7 @@ export async function streamRoutes(fastify) {
         await recordFailure(currentModel, 'other');
         logError({ type: String(result.status), model: currentModel, key_masked: lastKeyMasked });
         logRequest({ request_id: requestId, model: currentModel, api_key_masked: lastKeyMasked, latency_ms: 0, status: 'error', retries, prompt_length: promptLength, user_email: userEmail });
+        requestsTotal.inc({ model: currentModel, status: String(result.status) });
         reply.status(result.status >= 400 && result.status < 600 ? result.status : 502);
         return { error: 'Gemini API error', code: String(result.status), request_id: requestId };
       }
@@ -154,6 +168,10 @@ export async function streamRoutes(fastify) {
       // ── Success — stream back to client ────────────────────────────────────
       await returnKey(key);
       await recordSuccess(currentModel, Date.now() - wallStart);
+      requestsTotal.inc({ model: currentModel, status: 'success' });
+      requestDuration.observe({ model: currentModel }, Date.now() - wallStart);
+      if (retries > 0) retriesTotal.inc({ model: currentModel }, retries);
+
       reply.hijack();
 
       const res = reply.raw;
@@ -220,6 +238,7 @@ export async function streamRoutes(fastify) {
 
     // All retries exhausted
     logRequest({ request_id: requestId, model: currentModel, api_key_masked: lastKeyMasked, latency_ms: 0, status: 'exhausted', retries, prompt_length: promptLength, user_email: userEmail });
+    requestsTotal.inc({ model: currentModel ?? 'unknown', status: 'exhausted' });
     reply.status(503);
     return { error: 'All retries exhausted', code: 'RETRIES_EXHAUSTED', request_id: requestId };
   });
