@@ -1,4 +1,4 @@
-import { Queue } from 'bullmq';
+import { Queue, QueueEvents } from 'bullmq';
 import IORedis from 'ioredis';
 import { config } from '../config.js';
 
@@ -42,4 +42,15 @@ export function getQueue() {
     });
   }
   return _queue;
+}
+
+let _queueEvents;
+
+export function getQueueEvents() {
+  if (!_queueEvents) {
+    _queueEvents = new QueueEvents(QUEUE_NAME, {
+      connection: makeRedisConnection(),
+    });
+  }
+  return _queueEvents;
 }

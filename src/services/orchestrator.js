@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import { config } from '../config.js';
-import { getKey, returnKey, cooldownKey } from '../redis/keyPool.js';
+import { getKey, returnKey, cooldownKey, disableKey } from '../redis/keyPool.js';
 import { generateContent } from './gemini.js';
 import { recordSuccess, recordFailure, getBestModel } from '../redis/modelHealth.js';
 import { getFallbackModels } from '../redis/modelConfig.js';
@@ -145,7 +145,15 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
       continue;
     }
 
-    // Other API error (400, 401, 404, etc.) — return immediately, no retry
+    if (result.status === 401 || result.status === 403) {
+      await disableKey(key);
+      logError({ type: 'key_invalid', model: currentModel, key_masked: lastKeyMasked, message: `Status ${result.status}: API Key is invalid or revoked` });
+      recordFailureRateTick().catch(() => {});
+      lastError = 'key_invalid';
+      continue; // try next key
+    }
+
+    // Other API error (400, 404, etc.) — return immediately, no retry
     await returnKey(key);
     await recordFailure(currentModel, 'other');
     logError({ type: String(result.status), model: currentModel, key_masked: lastKeyMasked, message: result.data?.error?.message });

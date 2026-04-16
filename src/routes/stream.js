@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import { config } from '../config.js';
-import { getKey, returnKey, cooldownKey } from '../redis/keyPool.js';
+import { getKey, returnKey, cooldownKey, disableKey } from '../redis/keyPool.js';
 import { recordSuccess, recordFailure, getBestModel } from '../redis/modelHealth.js';
 import { getFallbackModels } from '../redis/modelConfig.js';
 import { streamGenerateContent } from '../services/gemini.js';
@@ -152,6 +152,13 @@ export async function streamRoutes(fastify) {
         if (!currentModel) break;
         fallbackIndex = fallbackModels.indexOf(currentModel);
         continue;
+      }
+
+      if (result.status === 401 || result.status === 403) {
+        result.bodyStream.destroy();
+        await disableKey(key);
+        logError({ type: 'key_invalid', model: currentModel, key_masked: lastKeyMasked, message: `Status ${result.status}: API Key is invalid` });
+        continue; // try next key
       }
 
       if (result.status !== 200) {
