@@ -4,6 +4,7 @@ import {
   updateModelConfig,
   addFallbackModel,
   removeFallbackModel,
+  getFallbackModels,
 } from '../redis/modelConfig.js';
 import { requireAdmin } from '../auth/roles.js';
 
@@ -12,8 +13,18 @@ export async function modelsRoutes(fastify) {
 
   // GET /v1/models/available — returns flat array of model names for dropdowns
   fastify.get('/v1/models/available', async () => {
-    const stats = await listAllModels();
-    return { models: stats.map(s => s.model) };
+    const [stats, configModels] = await Promise.all([
+      listAllModels(),
+      getFallbackModels()
+    ]);
+    
+    // Combine models with health data + models in admin config chain
+    const allModels = new Set([
+      ...stats.map(s => s.model),
+      ...configModels
+    ]);
+
+    return { models: Array.from(allModels) };
   });
 
   // ── Admin-only ────────────────────────────────────────────────────────────
