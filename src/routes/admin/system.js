@@ -38,6 +38,8 @@ export async function adminSystemRoutes(fastify) {
       alert_pool_low_threshold:parseInt(cfg.alert_pool_low_threshold,10) || 5,
       gen_temperature:         cfg.gen_temperature ? Number(cfg.gen_temperature) : null,
       gen_max_tokens:          cfg.gen_max_tokens  ? parseInt(cfg.gen_max_tokens, 10) : null,
+      max_sessions_user:       parseInt(cfg.max_sessions_user,  10) || 1,
+      max_sessions_admin:      parseInt(cfg.max_sessions_admin, 10) || 3,
     };
   });
 
@@ -57,6 +59,8 @@ export async function adminSystemRoutes(fastify) {
           alert_pool_low_threshold:{ type: 'integer', minimum: 1 },
           gen_temperature:         { type: 'number',  minimum: 0, maximum: 2 },
           gen_max_tokens:          { type: 'integer', minimum: 1 },
+          max_sessions_user:       { type: 'integer', minimum: 1 },
+          max_sessions_admin:      { type: 'integer', minimum: 1 },
         },
         additionalProperties: false,
       },

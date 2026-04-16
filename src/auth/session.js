@@ -2,6 +2,7 @@ import { randomBytes } from 'crypto';
 import jwt from 'jsonwebtoken';
 import { getRedis } from '../redis/client.js';
 import { config } from '../config.js';
+import { getMaxSessionsUser, getMaxSessionsAdmin } from '../redis/systemConfig.js';
 
 const SESSION_PREFIX = 'sessions:v2:'; // Using v2 prefix to avoid collisions with old session keys
 
@@ -28,7 +29,9 @@ export async function createSession(email, role = 'user', plan = 'free') {
   const now = Date.now();
 
   // Role-based session limits
-  const limit = (role === 'admin' || role === 'owner') ? 3 : 1;
+  const limit = (role === 'admin' || role === 'owner') 
+    ? await getMaxSessionsAdmin() 
+    : await getMaxSessionsUser();
 
   // Add new session to the set
   await redis.zadd(key, now, sessionId);

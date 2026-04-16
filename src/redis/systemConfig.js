@@ -25,6 +25,8 @@ const DEFAULTS = {
   payment_upi_2:           '',
   payment_qr_path:         '',
   payment_qr_file_id:      '',
+  max_sessions_user:       '1',
+  max_sessions_admin:      '3',
   // Email Notification Toggles (1=enabled, 0=disabled)
   email_security_enabled:  '1',
   email_status_enabled:    '1',
@@ -111,6 +113,22 @@ export async function isRegistrationEnabled() {
 export async function getDefaultPerMin() {
   const val = await getSystemConfig('default_per_min');
   return parseInt(val, 10) || 60;
+}
+
+/**
+ * Get the max concurrent sessions allowed for a standard user.
+ */
+export async function getMaxSessionsUser() {
+  const val = await getSystemConfig('max_sessions_user');
+  return parseInt(val, 10) || 1;
+}
+
+/**
+ * Get the max concurrent sessions allowed for an admin/owner.
+ */
+export async function getMaxSessionsAdmin() {
+  const val = await getSystemConfig('max_sessions_admin');
+  return parseInt(val, 10) || 3;
 }
 
 /**
