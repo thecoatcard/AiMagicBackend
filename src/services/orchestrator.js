@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 import { config } from '../config.js';
 import { getKey, returnKey, cooldownKey, disableKey } from '../redis/keyPool.js';
-import { generateContent } from './gemini.js';
+import { generateContent, embedContent, batchEmbedContents } from './gemini.js';
 import { recordSuccess, recordFailure, getBestModel } from '../redis/modelHealth.js';
 import { getFallbackModels } from '../redis/modelConfig.js';
 import { logRequest, logError } from '../db/logger.js';
@@ -49,6 +49,7 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
   let lastError = null;
   let retries = 0;
   let lastKeyMasked = null;
+  let model429Count = 0; // Consecutive 429 tracking for currentModel
 
   for (let attempt = 0; attempt < config.maxRetries; attempt++) {
     if (attempt > 0) retries++;
@@ -84,6 +85,7 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
           fallbackIndex++;
           currentModel = fallbackModels[fallbackIndex] ?? null;
         }
+        model429Count = 0; // Reset counter for new model
         if (!currentModel) break;
         continue;
       }
@@ -98,6 +100,7 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
     if (result.status === 200) {
       await returnKey(key);
       await recordSuccess(currentModel, result.latencyMs);
+      model429Count = 0; // Success -> reset counter
       logRequest({ request_id: reqId, model: currentModel, api_key_masked: lastKeyMasked, latency_ms: result.latencyMs, status: 'success', retries, prompt_length: prompt?.length ?? 0, usage_metadata: result.data?.usageMetadata, user_email: userEmail });
       requestsTotal.inc({ model: currentModel, status: 'success' });
       requestDuration.observe({ model: currentModel }, Date.now() - wallStart);
@@ -113,25 +116,34 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
     }
 
     if (result.status === 429) {
-      await cooldownKey(key, config.cooldownMs);
-      logError({ type: '429', model: currentModel, key_masked: lastKeyMasked });
-      keyCooldownsTotal.inc();
-      recordFailureRateTick().catch(() => {});
-      lastError = '429';
-      continue; // same model, just need a fresh key
+      model429Count++;
+      if (model429Count < 3) {
+        await cooldownKey(key, config.cooldownMs);
+        logError({ type: '429', model: currentModel, key_masked: lastKeyMasked, message: `Rate limit hit ${model429Count}/3` });
+        keyCooldownsTotal.inc();
+        recordFailureRateTick().catch(() => {});
+        lastError = '429';
+        continue; // Try same model with different key
+      }
+      // Hit 3 times -> Fall through to model switching logic
+      logError({ type: '429_EXHAUSTED', model: currentModel, key_masked: lastKeyMasked, message: 'Rate limit hit 3 times, switching model' });
+      await cooldownKey(key, config.cooldownMs); // Still cooldown the key that triggered it
     }
 
-    if (result.status === 503) {
-      await returnKey(key);
-      await recordFailure(currentModel, '503');
-      logError({ type: '503', model: currentModel, key_masked: lastKeyMasked });
-      model503Total.inc({ model: currentModel });
+    // Handle 5xx and explicit 4xx switches (400, 404)
+    if ([500, 502, 503, 504, 400, 404].includes(result.status) || (result.status === 429 && model429Count >= 3)) {
+      if (result.status !== 429) await returnKey(key);
+      
+      const type = String(result.status);
+      await recordFailure(currentModel, result.status >= 500 ? '503' : 'other');
+      logError({ type, model: currentModel, key_masked: lastKeyMasked });
+      if (result.status === 503) model503Total.inc({ model: currentModel });
       recordFailureRateTick().catch(() => {});
-      lastError = '503';
+      lastError = type;
 
       let remaining;
       if (fallbackIndex === -1) {
-        // User's custom model got 503 → try all fallback models
+        // User's custom model failed → try all fallback models
         remaining = fallbackModels;
       } else {
         // Skip the models we've already tried
@@ -142,6 +154,7 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
       currentModel = await getBestModel(remaining);
       if (!currentModel) break;
       fallbackIndex = fallbackModels.indexOf(currentModel);
+      model429Count = 0; // Reset counter for new model
       continue;
     }
 
@@ -166,3 +179,106 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
   requestsTotal.inc({ model: currentModel ?? 'unknown', status: 'exhausted' });
   return { error: 'All retries exhausted', lastError, code: 'RETRIES_EXHAUSTED', request_id: reqId, httpStatus: 503 };
 }
+
+/**
+ * Core embedding logic with retry and key rotation.
+ */
+export async function runEmbed({ text, model, requestId, userEmail } = {}) {
+  const reqId = requestId ?? randomUUID();
+  const currentModel = model ?? 'text-embedding-004';
+  
+  let lastError = null;
+  let retries = 0;
+  let lastKeyMasked = null;
+  let model429Count = 0;
+
+  for (let attempt = 0; attempt < config.maxRetries; attempt++) {
+    if (attempt > 0) retries++;
+
+    const key = await getKey();
+    if (!key) {
+      logRequest({ request_id: reqId, model: currentModel, api_key_masked: lastKeyMasked, latency_ms: 0, status: 'error', retries, user_email: userEmail });
+      notifyAdminNoKeys();
+      return { error: 'No API keys available', code: 'NO_KEYS', request_id: reqId, httpStatus: 503 };
+    }
+    lastKeyMasked = maskKey(key);
+
+    let result;
+    try {
+      if (Array.isArray(text)) {
+        result = await batchEmbedContents(key, currentModel, text);
+      } else {
+        result = await embedContent(key, currentModel, text);
+      }
+    } catch (err) {
+      await returnKey(key);
+      if (err.code === 'TIMEOUT') {
+        await recordFailure(currentModel, 'timeout');
+        logError({ type: 'timeout', model: currentModel, key_masked: lastKeyMasked, message: err.message });
+        modelTimeoutsTotal.inc({ model: currentModel });
+        recordFailureRateTick().catch(() => {});
+        lastError = 'timeout';
+        continue;
+      }
+      await recordFailure(currentModel, 'other');
+      logError({ type: 'other', model: currentModel, key_masked: lastKeyMasked, message: err.message });
+      recordFailureRateTick().catch(() => {});
+      return { error: err.message, code: 'UPSTREAM_ERROR', request_id: reqId, httpStatus: 502 };
+    }
+
+    if (result.status === 200) {
+      await returnKey(key);
+      await recordSuccess(currentModel, result.latencyMs);
+      logRequest({ request_id: reqId, model: currentModel, api_key_masked: lastKeyMasked, latency_ms: result.latencyMs, status: 'success', retries, user_email: userEmail });
+      requestsTotal.inc({ model: currentModel, status: 'success' });
+      return {
+        ...(result.data || {}),
+        model: currentModel,
+        request_id: reqId,
+        retries,
+        latency_ms: result.latencyMs,
+      };
+    }
+
+    if (result.status === 429) {
+      model429Count++;
+      if (model429Count < 3) {
+        await cooldownKey(key, config.cooldownMs);
+        logError({ type: '429', model: currentModel, key_masked: lastKeyMasked });
+        keyCooldownsTotal.inc();
+        recordFailureRateTick().catch(() => {});
+        lastError = '429';
+        continue;
+      }
+      await cooldownKey(key, config.cooldownMs);
+      logError({ type: '429_EXHAUSTED', model: currentModel, key_masked: lastKeyMasked });
+      break; // No fallback chain for embeddings yet
+    }
+
+    if ([500, 502, 503, 504, 400, 404].includes(result.status)) {
+      await returnKey(key);
+      await recordFailure(currentModel, result.status >= 500 ? '503' : 'other');
+      logError({ type: String(result.status), model: currentModel, key_masked: lastKeyMasked });
+      if (result.status === 503) model503Total.inc({ model: currentModel });
+      recordFailureRateTick().catch(() => {});
+      lastError = String(result.status);
+      continue;
+    }
+
+    if (result.status === 401 || result.status === 403) {
+      await disableKey(key);
+      logError({ type: 'key_invalid', model: currentModel, key_masked: lastKeyMasked });
+      recordFailureRateTick().catch(() => {});
+      lastError = 'key_invalid';
+      continue;
+    }
+
+    await returnKey(key);
+    logError({ type: String(result.status), model: currentModel, key_masked: lastKeyMasked, message: result.data?.error?.message });
+    return { error: result.data?.error?.message || 'Gemini API error', code: result.status, request_id: reqId, httpStatus: result.status };
+  }
+
+  logRequest({ request_id: reqId, model: currentModel, api_key_masked: lastKeyMasked, latency_ms: 0, status: 'exhausted', retries, user_email: userEmail });
+  return { error: 'All retries exhausted', lastError, code: 'RETRIES_EXHAUSTED', request_id: reqId, httpStatus: 503 };
+}
+

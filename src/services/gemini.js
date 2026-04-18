@@ -91,6 +91,99 @@ export async function streamGenerateContent(key, model, prompt, options = {}) {
 }
 
 /**
+ * Call the Gemini embedContent API.
+ *
+ * @param {string} key    - API key
+ * @param {string} model  - e.g. "text-embedding-004"
+ * @param {string} text   - text to embed
+ * @returns {{ status: number, data: object, latencyMs: number }}
+ * @throws {{ code: 'TIMEOUT' }} on request timeout
+ */
+export async function embedContent(key, model, text) {
+  const start = Date.now();
+  const body = JSON.stringify({
+    content: { parts: [{ text }] }
+  });
+
+  let statusCode, resBody;
+  try {
+    ({ statusCode, body: resBody } = await pool.request({
+      method: 'POST',
+      path: `/v1beta/models/${model}:embedContent`,
+      headers: { 
+        'content-type': 'application/json',
+        'x-goog-api-key': key 
+      },
+      body,
+      signal: AbortSignal.timeout(config.requestTimeoutMs),
+    }));
+  } catch (err) {
+    if (isTimeoutError(err)) {
+      const timeoutErr = new Error('Request timed out');
+      timeoutErr.code = 'TIMEOUT';
+      throw timeoutErr;
+    }
+    throw err;
+  }
+
+  try {
+    const rawData = await resBody.json();
+    return { status: statusCode, data: rawData, latencyMs: Date.now() - start };
+  } catch {
+    await resBody.dump();
+    return { status: statusCode, data: {}, latencyMs: Date.now() - start };
+  }
+}
+
+/**
+ * Call the Gemini batchEmbedContents API.
+ *
+ * @param {string}   key    - API key
+ * @param {string}   model  - e.g. "text-embedding-004"
+ * @param {string[]} texts  - array of texts to embed
+ * @returns {{ status: number, data: object, latencyMs: number }}
+ * @throws {{ code: 'TIMEOUT' }} on request timeout
+ */
+export async function batchEmbedContents(key, model, texts) {
+  const start = Date.now();
+  // Note: some models require "models/" prefix in the inner request
+  const requests = texts.map(text => ({
+    model: model.startsWith('models/') ? model : `models/${model}`,
+    content: { parts: [{ text }] }
+  }));
+  const body = JSON.stringify({ requests });
+
+  let statusCode, resBody;
+  try {
+    ({ statusCode, body: resBody } = await pool.request({
+      method: 'POST',
+      path: `/v1beta/models/${model}:batchEmbedContents`,
+      headers: { 
+        'content-type': 'application/json',
+        'x-goog-api-key': key 
+      },
+      body,
+      signal: AbortSignal.timeout(config.requestTimeoutMs),
+    }));
+  } catch (err) {
+    if (isTimeoutError(err)) {
+      const timeoutErr = new Error('Request timed out');
+      timeoutErr.code = 'TIMEOUT';
+      throw timeoutErr;
+    }
+    throw err;
+  }
+
+  try {
+    const rawData = await resBody.json();
+    return { status: statusCode, data: rawData, latencyMs: Date.now() - start };
+  } catch {
+    await resBody.dump();
+    return { status: statusCode, data: {}, latencyMs: Date.now() - start };
+  }
+}
+
+/**
  * Build the Gemini API request body.
  *
  * Supports:
@@ -133,7 +226,7 @@ function buildRequestBody(prompt, options = {}) {
   // ── Build the final body ───────────────────────────────────────────────────
   const generationConfig = {
     temperature:     options.temperature     ?? 1,
-    maxOutputTokens: options.maxOutputTokens ?? 8192,
+    maxOutputTokens: options.maxOutputTokens,
     ...options.generationConfig,
   };
 

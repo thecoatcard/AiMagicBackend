@@ -1,4 +1,4 @@
-import { runGenerate } from '../services/orchestrator.js';
+import { runGenerate, runEmbed } from '../services/orchestrator.js';
 import { checkUserRateLimit } from '../middleware/rateLimiter.js';
 
 // Accepted image MIME types
@@ -94,6 +94,34 @@ export async function generateRoutes(fastify) {
     if (thinkingBudget     !== undefined) options.thinkingBudget     = thinkingBudget;
 
     const result = await runGenerate({ prompt: prompt ?? '', model, options, userEmail: request.user?.email });
+
+    if (result.error) {
+      reply.status(result.httpStatus ?? 500);
+    }
+    const { httpStatus: _, ...response } = result;
+    return response;
+  });
+
+  fastify.post('/v1/embeddings', {
+    preHandler: checkUserRateLimit,
+    schema: {
+      body: {
+        type: 'object',
+        required: ['text'],
+        properties: {
+          text: { 
+            oneOf: [
+              { type: 'string', minLength: 1 },
+              { type: 'array', items: { type: 'string', minLength: 1 }, minItems: 1 }
+            ]
+          },
+          model: { type: 'string' },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    const { text, model } = request.body;
+    const result = await runEmbed({ text, model, userEmail: request.user?.email });
 
     if (result.error) {
       reply.status(result.httpStatus ?? 500);
