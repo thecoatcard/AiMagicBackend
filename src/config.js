@@ -2,7 +2,11 @@ import 'dotenv/config';
 
 export const config = {
   port: parseInt(process.env.PORT || '3000', 10),
-  redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
+  redisUrls: [
+    process.env.REDIS_URL_1,
+    process.env.REDIS_URL_2,
+    process.env.REDIS_URL_3,
+  ].filter(Boolean),
   geminiKeys: (process.env.GEMINI_KEYS || '').split(',').map(k => k.trim()).filter(Boolean),
   defaultModel: process.env.DEFAULT_MODEL || 'gemini-3.1-flash-lite-preview',
   cooldownMs: parseInt(process.env.COOLDOWN_MS || '60000', 10),

@@ -8,7 +8,8 @@ import { ensureWhitelistIndexes } from './db/whitelist.js';
 import { ensureAuditLogIndexes } from './db/auditLog.js';
 import { startWorker } from './queue/worker.js';
 import { getQueue } from './queue/index.js';
-import { getRedis } from './redis/client.js';
+import { getRedis, redisEvents } from './redis/client.js';
+import { syncAllBackups, warmupRedis } from './redis/sync.js';
 import { activeKeysGauge, cooldownKeysGauge, queueSizeGauge, workerActiveGauge } from './metrics/index.js';
 import { notifyAdminQueueBacklog, notifyAdminDailySummary, notifyAdminHighFailureRate } from './services/notifications.js';
 import { loadSystemConfigFromDb, seedPlanLimitsToRedis, getFailureRateCount, getSystemConfig } from './redis/systemConfig.js';
@@ -112,9 +113,30 @@ process.on('unhandledRejection', (reason, promise) => {
   server.log.error({ promise, reason }, '[Fatal] Unhandled Rejection at Promise');
 });
 
-// ── Background Monitoring (Lightweight Mode) ────────────────────────────────
+// ── Multi-Redis Failover & Syncing ──────────────────────────────────────────
 
-// 1. Key Pool Sync: Restore expired cooldown keys every 60s
+// 1. Handle Failover Event: When Redis switches, we must re-seed it from MongoDB
+redisEvents.on('failover', async ({ url }) => {
+  server.log.warn(`[Failover] New active Redis detected: ${url.split('@').pop()}`);
+  try {
+    // Sync "as needed" - fresh bootstrap on the new instance
+    await warmupRedis(url);
+    server.log.info('[Failover] System re-bootstrapped on new Redis instance');
+  } catch (err) {
+    server.log.error({ err }, '[Failover] Failed to re-bootstrap after switch');
+  }
+});
+
+// 2. Scheduled Background Sync: Keep all configured Redis instances updated every 3 hours
+setInterval(async () => {
+  try {
+    await syncAllBackups();
+  } catch (err) {
+    server.log.error({ err }, '[Sync] Periodic backup sync failed');
+  }
+}, 3 * 60 * 60 * 1000); // 3 hours
+
+// 3. Key Pool Sync: Restore expired cooldown keys every 60s
 setInterval(async () => {
   try {
     await restoreExpiredKeys();

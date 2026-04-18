@@ -73,9 +73,11 @@ export async function setSystemConfig(updates) {
 
 /**
  * Load system configuration from MongoDB into Redis.
- * Called on server startup.
+ * Called on server startup or during multi-Redis failover.
+ * @param {import('ioredis').Redis} [client] - optional client to target (defaults to active)
  */
-export async function loadSystemConfigFromDb() {
+export async function loadSystemConfigFromDb(client) {
+  const redis = client || getRedis();
   const doc = await getPersistentConfig('system');
   if (doc) {
     const { _id, updated_at, ...config } = doc;
@@ -84,7 +86,7 @@ export async function loadSystemConfigFromDb() {
       flat.push(k, String(v));
     }
     if (flat.length > 0) {
-      await getRedis().hset(CONFIG_KEY, ...flat);
+      await redis.hset(CONFIG_KEY, ...flat);
     }
     return true;
   }
@@ -156,9 +158,10 @@ export async function getPlanDailyLimit(plan) {
 /**
  * Seed plan limits to Redis from plans.js on startup.
  * Only sets keys that are not already stored (preserves admin overrides).
+ * @param {import('ioredis').Redis} [client]
  */
-export async function seedPlanLimitsToRedis() {
-  const redis = getRedis();
+export async function seedPlanLimitsToRedis(client) {
+  const redis = client || getRedis();
   for (const [planName, planDef] of Object.entries(PLANS)) {
     const key = `plan_limit_${planName}`;
     const existing = await redis.hget(CONFIG_KEY, key);

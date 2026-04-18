@@ -245,12 +245,13 @@ export async function seedKeysFromEnv(keys) {
 
 /**
  * Load all API keys from MongoDB and rebuild the Redis key pool.
+ * @param {import('ioredis').Redis} [client]
  */
-export async function syncApiKeysWithDb() {
+export async function syncApiKeysWithDb(client) {
+  const redis = client || getRedis();
   const keys = await getAllApiKeys();
   if (keys.length === 0) return false;
 
-  const redis = getRedis();
   const now = Date.now();
 
   // Clear current lists to avoid duplicates or orphans during rebuild

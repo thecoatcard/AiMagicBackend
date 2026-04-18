@@ -1,12 +1,15 @@
 import { Queue } from 'bullmq';
 import IORedis from 'ioredis';
 import { config } from '../config.js';
+import { redisEvents, getActiveRedisUrl } from '../redis/client.js';
 
 export const QUEUE_NAME = 'gemini-batch';
 
 // BullMQ requires an ioredis instance, NOT a plain { url } object
 function makeRedisConnection() {
-  return new IORedis(config.redisUrl, {
+  const url = getActiveRedisUrl();
+  console.info(`[Queue] Connecting to Redis: ${url.split('@').pop()}`);
+  return new IORedis(url, {
     maxRetriesPerRequest: null, // required by BullMQ
     enableReadyCheck: false,
   });
@@ -43,3 +46,17 @@ export function getQueue() {
   }
   return _queue;
 }
+
+export async function closeQueue() {
+  if (_queue) {
+    await _queue.close();
+    _queue = null;
+  }
+}
+
+// Re-initialize queue on redis failover
+redisEvents.on('failover', async () => {
+  console.info('[Queue] Resetting queue due to Redis failover...');
+  await closeQueue();
+  getQueue(); // Re-create with new connection
+});

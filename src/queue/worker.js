@@ -5,17 +5,22 @@ import { runGenerate } from '../services/orchestrator.js';
 import { QUEUE_NAME } from './index.js';
 import { notifyAdminWorkerFailure } from '../services/notifications.js';
 import { queueWaitDuration } from '../metrics/index.js';
+import { redisEvents, getActiveRedisUrl } from '../redis/client.js';
 
 function makeRedisConnection() {
-  return new IORedis(config.redisUrl, {
+  const url = getActiveRedisUrl();
+  console.info(`[Worker] Connecting to Redis: ${url.split('@').pop()}`);
+  return new IORedis(url, {
     maxRetriesPerRequest: null, // required by BullMQ
     enableReadyCheck: false,
   });
 }
 
 let _worker;
+let _currentConcurrency = 5;
 
 export function startWorker(concurrency = 5) {
+  _currentConcurrency = concurrency;
   if (_worker) return _worker;
 
   _worker = new Worker(
@@ -76,3 +81,10 @@ export async function stopWorker() {
     console.info('[worker] shut down complete');
   }
 }
+
+// Re-initialize worker on redis failover
+redisEvents.on('failover', async () => {
+  console.info('[Worker] Resetting worker due to Redis failover...');
+  await stopWorker();
+  startWorker(_currentConcurrency);
+});

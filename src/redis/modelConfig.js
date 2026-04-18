@@ -58,11 +58,13 @@ export async function updateModelConfig({ primaryModel, fallbackModels } = {}) {
 
 /**
  * Load model configuration from MongoDB into Redis.
+ * @param {import('ioredis').Redis} [client]
  */
-export async function loadModelConfigFromDb() {
+export async function loadModelConfigFromDb(client) {
+  const redis = client || getRedis();
   const doc = await getPersistentConfig('models');
   if (doc && doc.fallback_models) {
-    await getRedis().hset(CONFIG_KEY, 'fallback_models', JSON.stringify(doc.fallback_models));
+    await redis.hset(CONFIG_KEY, 'fallback_models', JSON.stringify(doc.fallback_models));
     return true;
   }
   return false;
