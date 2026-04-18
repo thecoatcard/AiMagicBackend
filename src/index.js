@@ -13,7 +13,7 @@ import { activeKeysGauge, cooldownKeysGauge, queueSizeGauge, workerActiveGauge }
 import { notifyAdminQueueBacklog, notifyAdminDailySummary, notifyAdminHighFailureRate } from './services/notifications.js';
 import { loadSystemConfigFromDb, seedPlanLimitsToRedis, getFailureRateCount, getSystemConfig } from './redis/systemConfig.js';
 import { loadModelConfigFromDb } from './redis/modelConfig.js';
-import { syncApiKeysWithDb, seedKeysFromEnv, restoreExpiredKeys } from './redis/keyPool.js';
+import { syncApiKeysWithDb, seedKeysFromEnv, restoreExpiredKeys, getPoolStats } from './redis/keyPool.js';
 
 const server = buildServer();
 
@@ -112,29 +112,33 @@ process.on('unhandledRejection', (reason, promise) => {
   server.log.error({ promise, reason }, '[Fatal] Unhandled Rejection at Promise');
 });
 
-// Background job: restore expired cooldown keys + update gauges every 5s
+// ── Background Monitoring (Lightweight Mode) ────────────────────────────────
+
+// 1. Key Pool Sync: Restore expired cooldown keys every 60s
 setInterval(async () => {
   try {
     await restoreExpiredKeys();
-
-    // Update key pool gauges
-    const redis = getRedis();
-    const [activeCount, cooldownCount] = await Promise.all([
-      redis.llen('gemini_keys'),
-      redis.zcard('gemini_keys_cooldown'),
-    ]);
-    activeKeysGauge.set(activeCount);
-    cooldownKeysGauge.set(cooldownCount);
   } catch (err) {
-    server.log.error({ err }, '[keyPool] background job failed');
+    server.log.error({ err }, '[keyPool] background sync failed');
   }
-}, 5_000);
+}, 60_000);
 
-// Update queue gauges every 10s + alert on backlog (threshold read from Redis)
+// 2. Metrics & Health: consolidated updates every 5 minutes (300s)
 setInterval(async () => {
   try {
+    const redis = getRedis();
     const queue = getQueue();
-    const counts = await queue.getJobCounts('waiting', 'active', 'completed', 'failed');
+
+    // A. Key Pool Stats
+    const pool = await getPoolStats();
+    activeKeysGauge.set(pool.active);
+    cooldownKeysGauge.set(pool.cooldown);
+
+    // B. Queue Stats & Backlog Alerting
+    const [counts, thresholdRaw] = await Promise.all([
+      queue.getJobCounts('waiting', 'active', 'completed', 'failed'),
+      getSystemConfig('alert_queue_threshold'),
+    ]);
     const { waiting = 0, active = 0, completed = 0, failed = 0 } = counts;
     queueSizeGauge.set({ state: 'waiting' },   waiting);
     queueSizeGauge.set({ state: 'active' },    active);
@@ -142,29 +146,23 @@ setInterval(async () => {
     queueSizeGauge.set({ state: 'failed' },    failed);
     workerActiveGauge.set(active);
 
-    const thresholdRaw = await getSystemConfig('alert_queue_threshold');
-    const threshold = parseInt(thresholdRaw, 10) || QUEUE_BACKLOG_THRESHOLD_DEFAULT;
+    const threshold = parseInt(thresholdRaw, 10) || 100;
     if (waiting > threshold) {
       notifyAdminQueueBacklog({ queueSize: waiting, threshold });
     }
-  } catch (err) {
-    server.log.error({ err }, '[queue] gauge update failed');
-  }
-}, 10_000);
 
-// Failure rate monitor — checks every 60s, alerts if failure count in last 5 min exceeds threshold
-setInterval(async () => {
-  try {
-    const thresholdRaw = await getSystemConfig('alert_failure_threshold');
-    const threshold = parseInt(thresholdRaw, 10) || 10;
+    // C. Failure Rate Monitor
+    const failThresholdRaw = await getSystemConfig('alert_failure_threshold');
+    const failThreshold = parseInt(failThresholdRaw, 10) || 10;
     const failureCount = await getFailureRateCount(5);
-    if (failureCount >= threshold) {
-      notifyAdminHighFailureRate({ failureCount, timeWindowMinutes: 5, threshold });
+    if (failureCount >= failThreshold) {
+      notifyAdminHighFailureRate({ failureCount, timeWindowMinutes: 5, threshold: failThreshold });
     }
+
   } catch (err) {
-    server.log.error({ err }, '[failureRate] monitor failed');
+    server.log.error({ err }, '[monitoring] consolidated background job failed');
   }
-}, 60_000);
+}, 300_000);
 /* eslint-enable no-inner-declarations */
 
 // Heartbeat: Ping Frontend every 20 minutes to prevent cold starts/hibernation
