@@ -10,8 +10,8 @@ export const config = {
   requestTimeoutMs: parseInt(process.env.REQUEST_TIMEOUT_MS || '100000', 10),
   mongodbUri: process.env.MONGODB_URI || 'mongodb://localhost:27017',
   mongodbName: process.env.MONGODB_NAME || 'keymanagement',
-  workerConcurrency: parseInt(process.env.WORKER_CONCURRENCY || '10', 10),
-  frontendUrl:       process.env.FRONTEND_URL || 'http://localhost:3000',
+  workerConcurrency: parseInt(process.env.WORKER_CONCURRENCY || '1', 1),
+  frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3000',
   // Email (Now handled by Frontend)
   frontendEmailUrl: process.env.FRONTEND_URL ? `${process.env.FRONTEND_URL}/api/email/send` : 'http://localhost:3000/api/email/send',
   emailApiSecret: process.env.EMAIL_API_SECRET || '',
