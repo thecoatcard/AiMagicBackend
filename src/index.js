@@ -166,23 +166,23 @@ setInterval(async () => {
 /* eslint-enable no-inner-declarations */
 
 // Heartbeat: Ping Frontend every 20 minutes to prevent cold starts/hibernation
-setInterval(async () => {
-  try {
-    const start = Date.now();
-    const res = await fetch(config.frontendUrl, { signal: AbortSignal.timeout(10000) });
-    const latency = Date.now() - start;
-    server.log.info({ 
-      url: config.frontendUrl, 
-      status: res.status, 
-      latency_ms: latency 
-    }, '[Heartbeat] Pinged Frontend');
-  } catch (err) {
-    server.log.warn({ 
-      url: config.frontendUrl, 
-      err: err.message 
-    }, '[Heartbeat] Failed to ping Frontend');
-  }
-}, 20 * 60 * 1000);
+// setInterval(async () => {
+//   try {
+//     const start = Date.now();
+//     const res = await fetch(config.frontendUrl, { signal: AbortSignal.timeout(10000) });
+//     const latency = Date.now() - start;
+//     server.log.info({ 
+//       url: config.frontendUrl, 
+//       status: res.status, 
+//       latency_ms: latency 
+//     }, '[Heartbeat] Pinged Frontend');
+//   } catch (err) {
+//     server.log.warn({ 
+//       url: config.frontendUrl, 
+//       err: err.message 
+//     }, '[Heartbeat] Failed to ping Frontend');
+//   }
+// }, 20 * 60 * 1000);
 
 // Daily summary — fires once per day at 08:00 UTC
 scheduleDailySummary();
