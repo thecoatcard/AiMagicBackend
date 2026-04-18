@@ -84,6 +84,7 @@ export async function streamRoutes(fastify) {
     // Shared retry tracking (for logRequest parity with /v1/generate)
     let retries = 0;
     let lastKeyMasked = null;
+    let model429Count = 0; // Consecutive 429 tracking for currentModel
     // ─────────────────────────────────────────────────────────────────────────
 
     for (let attempt = 0; attempt < config.maxRetries; attempt++) {
@@ -120,6 +121,7 @@ export async function streamRoutes(fastify) {
             fallbackIndex++;
             currentModel = fallbackModels[fallbackIndex] ?? null;
           }
+          model429Count = 0; // Reset counter for new model
           if (!currentModel) break;
           continue;
         }
@@ -133,19 +135,29 @@ export async function streamRoutes(fastify) {
 
       if (result.status === 429) {
         result.bodyStream.destroy();
-        logError({ type: '429', model: currentModel, key_masked: lastKeyMasked });
-        keyCooldownsTotal.inc();
-        await cooldownKey(key, config.cooldownMs);
-        continue; // same model, rotate key
+        model429Count++;
+        if (model429Count < 3) {
+          logError({ type: '429', model: currentModel, key_masked: lastKeyMasked, message: `Rate limit hit ${model429Count}/3` });
+          keyCooldownsTotal.inc();
+          await cooldownKey(key, config.cooldownMs);
+          continue; // same model, rotate key
+        }
+        logError({ type: '429_EXHAUSTED', model: currentModel, key_masked: lastKeyMasked, message: 'Rate limit hit 3 times, switching model' });
+        await cooldownKey(key, config.cooldownMs); // Still cooldown the key that triggered it
       }
 
-      if (result.status === 503) {
-        result.bodyStream.destroy();
-        await returnKey(key);
-        await recordFailure(currentModel, '503');
-        logError({ type: '503', model: currentModel, key_masked: lastKeyMasked });
-        model503Total.inc({ model: currentModel });
-
+      // Handle 5xx and explicit 4xx switches (400, 404)
+      if ([500, 502, 503, 504, 400, 404].includes(result.status) || (result.status === 429 && model429Count >= 3)) {
+        if (result.status !== 429) {
+          result.bodyStream?.destroy();
+          await returnKey(key);
+        }
+        
+        const type = String(result.status);
+        await recordFailure(currentModel, result.status >= 500 ? '503' : 'other');
+        logError({ type, model: currentModel, key_masked: lastKeyMasked });
+        if (result.status === 503) model503Total.inc({ model: currentModel });
+        
         const remaining = fallbackIndex === -1
           ? fallbackModels
           : fallbackModels.slice(fallbackIndex + 1);
@@ -153,6 +165,7 @@ export async function streamRoutes(fastify) {
         currentModel = await getBestModel(remaining);
         if (!currentModel) break;
         fallbackIndex = fallbackModels.indexOf(currentModel);
+        model429Count = 0; // Reset counter for new model
         continue;
       }
 
@@ -167,7 +180,7 @@ export async function streamRoutes(fastify) {
         result.bodyStream.destroy();
         await returnKey(key);
         await recordFailure(currentModel, 'other');
-        logError({ type: String(result.status), model: currentModel, key_masked: lastKeyMasked });
+        logError({ type: String(result.status), model: currentModel, key_masked: lastKeyMasked, message: `Streaming error status: ${result.status}` });
         logRequest({ request_id: requestId, model: currentModel, api_key_masked: lastKeyMasked, latency_ms: 0, status: 'error', retries, prompt_length: promptLength, user_email: userEmail });
         requestsTotal.inc({ model: currentModel, status: String(result.status) });
         reply.status(result.status >= 400 && result.status < 600 ? result.status : 502);
@@ -177,6 +190,7 @@ export async function streamRoutes(fastify) {
       // ── Success — stream back to client ────────────────────────────────────
       await returnKey(key);
       await recordSuccess(currentModel, Date.now() - wallStart);
+      model429Count = 0; // Success -> reset counter
       requestsTotal.inc({ model: currentModel, status: 'success' });
       requestDuration.observe({ model: currentModel }, Date.now() - wallStart);
       if (retries > 0) retriesTotal.inc({ model: currentModel }, retries);
