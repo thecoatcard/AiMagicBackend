@@ -111,7 +111,17 @@ export async function usersRoutes(fastify) {
         reply.status(400);
         return { error: 'plan is required for set_plan action', code: 'MISSING_PLAN' };
       }
-      result = await bulkUpdateUsers(safeEmails, { plan });
+      
+      const update = { plan };
+      if (plan === 'premium') {
+        const expiresAt = new Date();
+        expiresAt.setDate(expiresAt.getDate() + 30);
+        update.premium_expires_at = expiresAt;
+      } else {
+        update.premium_expires_at = null; // unset if moving to free
+      }
+
+      result = await bulkUpdateUsers(safeEmails, update);
       // Bust caches for all affected users
       await Promise.all(safeEmails.map(e => invalidateUserLimitsCache(e).catch(() => {})));
     }
@@ -285,7 +295,14 @@ export async function usersRoutes(fastify) {
     const { plan } = request.body;
     // Fetch old plan before overwriting so the notification shows the change
     const existingUser = await getUser(email);
-    const found = await setUserPlan(email, plan);
+    
+    let expiresAt = null;
+    if (plan === 'premium') {
+      expiresAt = new Date();
+      expiresAt.setDate(expiresAt.getDate() + 30);
+    }
+
+    const found = await setUserPlan(email, plan, expiresAt);
     if (!found) {
       reply.status(404);
       return { error: 'User not found', email };
@@ -297,7 +314,7 @@ export async function usersRoutes(fastify) {
       newPlan:  plan,
       newLimit: await getPlanDailyLimit(plan),
     });
-    return { updated: true, email, plan };
+    return { updated: true, email, plan, premium_expires_at: expiresAt };
   });
 
   // ── DELETE /v1/users/:email — remove user (admin only) ────────────────────

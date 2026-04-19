@@ -109,17 +109,56 @@ export async function setUserLimits(email, limits) {
  * takes effect immediately without needing a manual limits update.
  * Returns false if user not found.
  */
-export async function setUserPlan(email, plan) {
+export async function setUserPlan(email, plan, expiresAt = null) {
   const db = await getDb();
-  const result = await db.collection('users').updateOne(
-    { email },
-    {
-      $set:   { plan },
-      $unset: { 'limits.max_requests_per_day': '' },
-    }
-  );
+  const update = {
+    $set:   { plan },
+    $unset: { 'limits.max_requests_per_day': '' },
+  };
+
+  if (plan === 'premium' && expiresAt) {
+    update.$set.premium_expires_at = expiresAt;
+  } else {
+    update.$unset.premium_expires_at = '';
+  }
+
+  const result = await db.collection('users').updateOne({ email }, update);
   return result.matchedCount > 0;
 }
+
+/**
+ * Find all users whose premium plan has expired and revert them to 'free'.
+ * This is meant to be called by a periodic background worker.
+ */
+export async function revertExpiredPremiums() {
+  const db = await getDb();
+  const now = new Date();
+
+  // 1. Find the target users
+  const expiredUsers = await db.collection('users').find({
+    plan:               'premium',
+    premium_expires_at: { $lte: now },
+  }).toArray();
+
+  if (expiredUsers.length === 0) return { reverted: 0 };
+
+  const emails = expiredUsers.map(u => u.email);
+
+  // 2. Perform bulk update
+  const result = await db.collection('users').updateMany(
+    { email: { $in: emails } },
+    {
+      $set:   { plan: 'free' },
+      $unset: { premium_expires_at: '', 'limits.max_requests_per_day': '' },
+    }
+  );
+
+  return { 
+    reverted: result.modifiedCount, 
+    emails 
+  };
+}
+
 
 /**
  * Atomically increment total_requests usage counter.

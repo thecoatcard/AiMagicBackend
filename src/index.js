@@ -1,7 +1,7 @@
 import { config } from './config.js';
 import { buildServer } from './server.js';
 import { getDb } from './db/client.js';
-import { ensureUserIndexes, ensureOwner } from './db/users.js';
+import { ensureUserIndexes, ensureOwner, revertExpiredPremiums } from './db/users.js';
 import { ensureTicketIndexes, ensureTicketTextIndex } from './db/tickets.js';
 import { ensureToolsIndexes } from './db/tools.js';
 import { ensureWhitelistIndexes } from './db/whitelist.js';
@@ -15,6 +15,8 @@ import { notifyAdminQueueBacklog, notifyAdminDailySummary, notifyAdminHighFailur
 import { loadSystemConfigFromDb, seedPlanLimitsToRedis, getFailureRateCount, getSystemConfig } from './redis/systemConfig.js';
 import { loadModelConfigFromDb } from './redis/modelConfig.js';
 import { syncApiKeysWithDb, seedKeysFromEnv, restoreExpiredKeys, getPoolStats } from './redis/keyPool.js';
+import { invalidateUserLimitsCache } from './middleware/rateLimiter.js';
+import { writeAuditLog } from './db/auditLog.js';
 
 const server = buildServer();
 
@@ -208,6 +210,32 @@ setInterval(async () => {
 
 // Daily summary — fires once per day at 08:00 UTC
 scheduleDailySummary();
+
+// Premium Expiry Cleanup — runs once on startup and then every hour
+async function cleanupExpiredSubscriptions() {
+  try {
+    const { reverted, emails = [] } = await revertExpiredPremiums();
+    if (reverted > 0) {
+      server.log.info({ count: reverted }, '[Subscriptions] Auto-downgraded expired premium accounts');
+      // Invalidate Redis caches for these users
+      await Promise.all(emails.map(email => invalidateUserLimitsCache(email).catch(() => {})));
+      
+      // Write to audit log
+      writeAuditLog({
+        actorEmail: 'system-worker',
+        action:     'auto_downgrade',
+        meta:       { emails, count: reverted, reason: 'expiry' },
+      });
+    }
+  } catch (err) {
+    server.log.error({ err }, '[Subscriptions] Cleanup task failed');
+  }
+}
+
+// Run immediately on start
+cleanupExpiredSubscriptions();
+// Then run every hour
+setInterval(cleanupExpiredSubscriptions, 60 * 60 * 1000);
 
 try {
   await server.listen({ port: config.port, host: '0.0.0.0' });
