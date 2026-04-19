@@ -12,7 +12,7 @@ export async function getDb() {
   if (!_connectingPromise) {
     _connectingPromise = (async () => {
       const client = new MongoClient(config.mongodbUri, {
-        maxPoolSize: 10,
+        maxPoolSize: 100,
         serverSelectionTimeoutMS: 5000,
       });
 
