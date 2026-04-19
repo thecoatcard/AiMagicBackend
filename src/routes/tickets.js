@@ -7,7 +7,7 @@ import {
   getTicketStats,
   bulkCloseTickets,
 } from '../db/tickets.js';
-import { requireAdmin } from '../auth/roles.js';
+import { requireAdmin, requireOwner } from '../auth/roles.js';
 import {
   notifyTicketCreated,
   notifyTicketReply,
@@ -302,9 +302,9 @@ export async function ticketsRoutes(fastify) {
     return updated;
   });
 
-  // ── DELETE /v1/tickets/:id — delete ticket (admin only) ───────────────────
+  // ── DELETE /v1/tickets/:id — delete ticket (owner only) ───────────────────
   fastify.delete('/v1/tickets/:id', {
-    preHandler: requireAdmin,
+    preHandler: requireOwner,
   }, async (request, reply) => {
     const deleted = await deleteTicket(request.params.id);
 

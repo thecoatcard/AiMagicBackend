@@ -262,6 +262,32 @@ export async function adminSystemRoutes(fastify) {
     return { success: true, filename: part.filename, fileId };
   });
 
+  // ── DELETE /v1/admin/system/payment-qr — remove QR code ────────────────────
+  fastify.delete('/v1/admin/system/payment-qr', async (request) => {
+    const cfg = await getAllSystemConfig();
+    const bucket = await getToolsBucket();
+
+    // 1. Clean up GridFS file if exists
+    if (cfg.payment_qr_file_id) {
+      try { await bucket.delete(new ObjectId(cfg.payment_qr_file_id)); } catch {}
+    }
+
+    // 2. Clean up legacy disk file if exists
+    if (cfg.payment_qr_path && existsSync(cfg.payment_qr_path)) {
+      try { unlinkSync(cfg.payment_qr_path); } catch {}
+    }
+
+    // 3. Update config
+    await setSystemConfig({ 
+      payment_qr_file_id: '', 
+      payment_qr_path: '' 
+    });
+
+    writeAuditLog({ actorEmail: request.user.email, action: 'payment_qr_delete' });
+    return { success: true };
+  });
+
+
   // ── GET /v1/admin/system/emails — email notification status ────────────────
   fastify.get('/v1/admin/system/emails', async () => {
     const cfg = await getAllSystemConfig();
