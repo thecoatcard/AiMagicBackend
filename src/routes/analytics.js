@@ -1,6 +1,6 @@
 import { getDb } from '../db/client.js';
 import { getUser } from '../db/users.js';
-import { requireAdmin } from '../auth/roles.js';
+import { requireAdmin, requireOwner } from '../auth/roles.js';
 import { getDailyUsage } from '../middleware/rateLimiter.js';
 import { PLANS } from '../config/plans.js';
 import { getPlanDailyLimit } from '../redis/systemConfig.js';
@@ -28,8 +28,8 @@ export async function analyticsRoutes(fastify) {
     const filter = {};
     if (model)  filter.model  = model;
     if (status) filter.status = status;
-    // Non-admins/owners can only see their own requests
-    const isPrivileged = request.user.role === 'admin' || request.user.role === 'owner';
+    // Non-owners can only see their own requests (Admins are now restricted from global logs)
+    const isPrivileged = request.user.role === 'owner';
     if (!isPrivileged) filter.user_email = request.user.email;
 
     let db;
@@ -51,7 +51,7 @@ export async function analyticsRoutes(fastify) {
 
   // GET /v1/errors — paginated error log (admin only)
   fastify.get('/v1/errors', {
-    preHandler: requireAdmin,
+    preHandler: requireOwner,
     schema: {
       querystring: {
         type: 'object',
@@ -94,8 +94,8 @@ export async function analyticsRoutes(fastify) {
       reply.status(503); return { error: 'Database unavailable', code: 'DB_UNAVAILABLE' };
     }
 
-    const isAdmin = request.user.role === 'admin' || request.user.role === 'owner';
-    const matchStage = isAdmin ? {} : { user_email: request.user.email };
+    const isOwner = request.user.role === 'owner';
+    const matchStage = isOwner ? {} : { user_email: request.user.email };
     const matchFilter = Object.keys(matchStage).length > 0 ? [{ $match: matchStage }] : [];
 
     const [overall, byModel, byStatus] = await Promise.all([
@@ -150,7 +150,7 @@ export async function analyticsRoutes(fastify) {
 
   // GET /v1/analytics/time-series — request counts bucketed by hour or day (admin only)
   fastify.get('/v1/analytics/time-series', {
-    preHandler: requireAdmin,
+    preHandler: requireOwner,
     schema: {
       querystring: {
         type: 'object',
@@ -192,7 +192,7 @@ export async function analyticsRoutes(fastify) {
 
   // GET /v1/analytics/users — per-user usage stats (admin only)
   fastify.get('/v1/analytics/users', {
-    preHandler: requireAdmin,
+    preHandler: requireOwner,
     schema: {
       querystring: {
         type: 'object',
@@ -232,7 +232,7 @@ export async function analyticsRoutes(fastify) {
 
   // GET /v1/analytics/errors/summary — error type breakdown (admin only)
   fastify.get('/v1/analytics/errors/summary', {
-    preHandler: requireAdmin,
+    preHandler: requireOwner,
     schema: {
       querystring: {
         type: 'object',
@@ -275,7 +275,7 @@ export async function analyticsRoutes(fastify) {
 
   // DELETE /v1/logs — purge request logs older than N days (admin only)
   fastify.delete('/v1/logs', {
-    preHandler: requireAdmin,
+    preHandler: requireOwner,
     schema: {
       querystring: {
         type: 'object',
@@ -297,7 +297,7 @@ export async function analyticsRoutes(fastify) {
 
   // GET /v1/logs/export — CSV export of request logs (admin only)
   fastify.get('/v1/logs/export', {
-    preHandler: requireAdmin,
+    preHandler: requireOwner,
     schema: {
       querystring: {
         type: 'object',

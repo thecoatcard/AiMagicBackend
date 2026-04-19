@@ -6,7 +6,7 @@ import {
   removeFallbackModel,
   getFallbackModels,
 } from '../redis/modelConfig.js';
-import { requireAdmin } from '../auth/roles.js';
+import { requireOwner } from '../auth/roles.js';
 
 export async function modelsRoutes(fastify) {
   // ── Public/User authenticated ─────────────────────────────────────────────
@@ -30,12 +30,12 @@ export async function modelsRoutes(fastify) {
   // ── Admin-only ────────────────────────────────────────────────────────────
 
   // GET /v1/models — live health stats for all models
-  fastify.get('/v1/models', { preHandler: [requireAdmin] }, async () => {
+  fastify.get('/v1/models', { preHandler: [requireOwner] }, async () => {
     return { models: await listAllModels() };
   });
 
   // GET /v1/models/:name/stats — stats for one model
-  fastify.get('/v1/models/:name/stats', { preHandler: [requireAdmin] }, async (request, reply) => {
+  fastify.get('/v1/models/:name/stats', { preHandler: [requireOwner] }, async (request, reply) => {
     const stats = await getModelStats(request.params.name);
     if (!stats.last_updated) {
       reply.status(404);
@@ -46,7 +46,7 @@ export async function modelsRoutes(fastify) {
 
   // PATCH /v1/models/:name — reset health counters
   fastify.patch('/v1/models/:name', {
-    preHandler: [requireAdmin],
+    preHandler: [requireOwner],
     schema: {
       body: {
         type: 'object',
@@ -69,13 +69,13 @@ export async function modelsRoutes(fastify) {
   // ── Fallback chain config ─────────────────────────────────────────────────
 
   // GET /v1/models/config — view primary model and ordered fallback chain
-  fastify.get('/v1/models/config', { preHandler: [requireAdmin] }, async () => {
+  fastify.get('/v1/models/config', { preHandler: [requireOwner] }, async () => {
     return await getModelConfig();
   });
 
   // PATCH /v1/models/config — update primary model and/or replace entire fallback list
   fastify.patch('/v1/models/config', {
-    preHandler: [requireAdmin],
+    preHandler: [requireOwner],
     schema: {
       body: {
         type: 'object',
@@ -97,7 +97,7 @@ export async function modelsRoutes(fastify) {
 
   // POST /v1/models/config/fallback — add a model to the fallback chain
   fastify.post('/v1/models/config/fallback', {
-    preHandler: [requireAdmin],
+    preHandler: [requireOwner],
     schema: {
       body: {
         type: 'object',
@@ -119,7 +119,7 @@ export async function modelsRoutes(fastify) {
   });
 
   // DELETE /v1/models/config/fallback/:name — remove a model from the fallback chain
-  fastify.delete('/v1/models/config/fallback/:name', { preHandler: [requireAdmin] }, async (request, reply) => {
+  fastify.delete('/v1/models/config/fallback/:name', { preHandler: [requireOwner] }, async (request, reply) => {
     const { name } = request.params;
     const result = await removeFallbackModel(name);
     if (!result.removed) {

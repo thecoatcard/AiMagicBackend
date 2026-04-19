@@ -4,7 +4,7 @@ import sensible from '@fastify/sensible';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
 import { authenticate } from './auth/middleware.js';
-import { requireAdmin } from './auth/roles.js';
+import { requireAdmin, requireOwner } from './auth/roles.js';
 import { authRoutes } from './routes/auth.js';
 import { healthRoutes } from './routes/health.js';
 import { generateRoutes } from './routes/generate.js';
@@ -86,21 +86,28 @@ export function buildServer() {
     // models — listing available models is public for chat settings; admin routes protected inline
     instance.register(modelsRoutes);
 
-    // ── Admin-only endpoints ─────────────────────────────────────────────────
+    // ── Admin-only endpoints (Common) ────────────────────────────────────────
     instance.register(async (admin) => {
       admin.addHook('preHandler', requireAdmin);
+      // Currently empty as specific modules are moved to owner block below.
+      // usersRoutes and ticketsRoutes are registered above and handles roles internally.
+    });
 
-      admin.register(keysRoutes);
-      admin.register(queueRoutes);
-      admin.register(metricsRoutes);
-      admin.register(debugRoutes);
+    // ── Owner-only endpoints (Sensitive) ─────────────────────────────────────
+    instance.register(async (owner) => {
+      owner.addHook('preHandler', requireOwner);
 
-      // New admin control panel routes
-      admin.register(adminSystemRoutes);
-      admin.register(adminAlertsRoutes);
-      admin.register(adminHealthRoutes);
-      admin.register(adminAuditRoutes);
-      admin.register(adminToolsRoutes);
+      owner.register(keysRoutes);
+      owner.register(queueRoutes);
+      owner.register(metricsRoutes);
+      owner.register(debugRoutes);
+
+      // Admin control panel routes now restricted to owner
+      owner.register(adminSystemRoutes);
+      owner.register(adminAlertsRoutes);
+      owner.register(adminHealthRoutes);
+      owner.register(adminAuditRoutes);
+      owner.register(adminToolsRoutes);
     });
   });
 

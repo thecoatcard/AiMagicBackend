@@ -63,7 +63,7 @@ export async function usersRoutes(fastify) {
     return await listUsers({ limit, skip });
   });
 
-  // ── GET /v1/users/stats — aggregate user statistics (admin only) ──────────
+  // ── GET /v1/users/stats — aggregate user statistics (owner only) ──────────
   fastify.get('/v1/users/stats', {
     preHandler: requireAdmin,
   }, async (request, reply) => {
