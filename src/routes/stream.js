@@ -7,7 +7,8 @@ import { streamGenerateContent } from '../services/gemini.js';
 import { logRequest, logError } from '../db/logger.js';
 import { checkUserRateLimit } from '../middleware/rateLimiter.js';
 import { notifyAdminNoKeys } from '../services/notifications.js';
-import { imagesSchema, historySchema } from './generate.js';
+import { imagesSchema, historySchema, filesSchema } from './generate.js';
+import { parseFileToContent } from '../services/fileParsers.js';
 import { maskKey } from '../services/orchestrator.js';
 import {
   requestsTotal,
@@ -27,6 +28,7 @@ export async function streamRoutes(fastify) {
         properties: {
           prompt: { type: 'string', minLength: 1 },
           images: imagesSchema,
+          files: filesSchema,
           model: { type: 'string' },
           temperature: { type: 'number', minimum: 0, maximum: 2 },
           maxOutputTokens: { type: 'integer', minimum: 1 },
@@ -37,12 +39,12 @@ export async function streamRoutes(fastify) {
       },
     },
   }, async (request, reply) => {
-    const { prompt, images, model, temperature, maxOutputTokens,
+    const { prompt, images, files, model, temperature, maxOutputTokens,
       systemInstruction, history, thinkingBudget } = request.body;
 
-    if (!prompt && (!images || images.length === 0)) {
+    if (!prompt && (!images || images.length === 0) && (!files || files.length === 0)) {
       reply.status(400);
-      return { error: 'Either prompt or images (or both) must be provided', code: 'BAD_REQUEST' };
+      return { error: 'Either prompt, images, or files (or a combination) must be provided', code: 'BAD_REQUEST' };
     }
 
     if (images) {
@@ -59,10 +61,22 @@ export async function streamRoutes(fastify) {
       }
     }
 
+    // Parse files (PDF → inline binary part, Excel/CSV → extracted text)
+    let parsedFiles;
+    if (files?.length) {
+      try {
+        parsedFiles = files.map(f => parseFileToContent(f));
+      } catch (err) {
+        reply.status(400);
+        return { error: err.message, code: 'BAD_REQUEST' };
+      }
+    }
+
     const options = {};
     if (temperature !== undefined) options.temperature = temperature;
     if (maxOutputTokens !== undefined) options.maxOutputTokens = maxOutputTokens;
     if (images?.length) options.images = images;
+    if (parsedFiles?.length) options.files = parsedFiles;
     if (systemInstruction) options.systemInstruction = systemInstruction;
     if (history?.length) options.history = history;
     if (thinkingBudget !== undefined) options.thinkingBudget = thinkingBudget;

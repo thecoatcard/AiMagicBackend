@@ -1,4 +1,4 @@
-# Coatcard AiMagic API — Frontend Developer Guide
+# Coatcard AiMagic API — Developer Guide
 
 **Base URL:** `http://localhost:3000` (development) · `https://aimagicbackend.onrender.com` (production)  
 **Content-Type:** `application/json` for all requests and responses (except `/v1/metrics` and `/v1/generate/stream`)
@@ -12,29 +12,31 @@
 3. [Making Authenticated Requests](#3-making-authenticated-requests)
 4. [Roles & Access Control](#4-roles--access-control)
 5. [AI Generation Endpoints](#5-ai-generation-endpoints)
-6. [Streaming](#6-streaming)
-7. [Batch Processing](#7-batch-processing)
-8. [User Management](#8-user-management)
-9. [Support Tickets](#9-support-tickets)
-10. [Tools Marketplace](#10-tools-marketplace)
-11. [Analytics & Logs](#11-analytics--logs)
-12. [Admin — Key Management](#12-admin--key-management)
-13. [Admin — Model Config & Health](#13-admin--model-config--health)
-14. [Admin — Queue Management](#14-admin--queue-management)
-15. [Admin — System Control](#15-admin--system-control)
-16. [Admin — Alerts & Notifications](#16-admin--alerts--notifications)
-17. [Admin — Health Dashboard](#17-admin--health-dashboard)
-18. [Admin — Audit Log](#18-admin--audit-log)
-19. [Admin — Batch Tools](#19-admin--batch-tools)
-20. [Infrastructure](#20-infrastructure)
-21. [Error Reference](#21-error-reference)
-22. [Tester Use Cases & Verification](#22-tester-use-cases--verification)
+6. [Embeddings](#6-embeddings)
+7. [Streaming](#7-streaming)
+8. [Batch Processing](#8-batch-processing)
+9. [User Management](#9-user-management)
+10. [Support Tickets](#10-support-tickets)
+11. [Tools Marketplace](#11-tools-marketplace)
+12. [Analytics & Logs](#12-analytics--logs)
+13. [Admin — Key Management](#13-admin--key-management)
+14. [Admin — Model Config & Health](#14-admin--model-config--health)
+15. [Admin — Queue Management](#15-admin--queue-management)
+16. [Admin — System Control](#16-admin--system-control)
+17. [Admin — Alerts & Notifications](#17-admin--alerts--notifications)
+18. [Admin — Health Dashboard](#18-admin--health-dashboard)
+19. [Admin — Audit Log](#19-admin--audit-log)
+20. [Payment & Public System Routes](#20-payment--public-system-routes)
+21. [Infrastructure](#21-infrastructure)
+22. [Error Reference](#22-error-reference)
+23. [Full Flow Examples](#23-full-flow-examples)
+24. [Tester Use Cases & Verification](#24-tester-use-cases--verification)
 
 ---
 
 ## 1. Authentication Overview
 
-All `/v1/*` endpoints require a valid JWT token sent in the `Authorization` header.
+All `/v1/*` endpoints require a valid JWT token sent in the `Authorization` header (or as `?token=<JWT>` query parameter).
 
 The login flow is **two-step** and uses email OTP (One-Time Password):
 
@@ -123,7 +125,7 @@ Verify the OTP and receive a JWT token.
 }
 ```
 
-> `otp` must be exactly 6 **digits** (string, not number)
+> `otp` must be exactly 6 **digits** (string matching `^[0-9]{6}$`)
 
 **Success `200`:**
 ```json
@@ -206,6 +208,8 @@ Authorization: Bearer <your-jwt-token>
 Content-Type: application/json
 ```
 
+Alternatively, the JWT can be passed as a query parameter: `?token=<your-jwt-token>`
+
 ### JavaScript Fetch Example
 
 ```js
@@ -276,7 +280,7 @@ api.interceptors.response.use(
 |---|---|
 | `ACCOUNT_BLOCKED` | Admin blocked your account |
 | `FORBIDDEN` | You don't have the required role for this endpoint |
-| `IMPERSONATION_READ_ONLY` | Impersonated sessions cannot make write requests |
+| `IMPERSONATION_READ_ONLY` | Impersonated sessions cannot make write requests (POST/PUT/PATCH/DELETE) |
 
 ### When You Get a 503
 
@@ -296,9 +300,9 @@ Every user has one of three roles:
 
 | Role | What they can do |
 |---|---|
-| `user` | Generate content, stream, batch, view own logs/usage, manage own tickets |
-| `admin` | Everything a user can do, plus: manage keys, models, queue, all users, all tickets, analytics, debug tools, metrics, admin control panel |
-| `owner` | Everything an admin can do, plus: the only role that can promote/demote users to/from admin, impersonate users, and cannot be blocked, deleted, or demoted via the API |
+| `user` | Generate content, stream, batch, embeddings, view own logs/usage, manage own tickets, browse tools |
+| `admin` | Everything a user can do, plus: manage users, tickets (admin actions), set plans, view user stats |
+| `owner` | Everything an admin can do, plus: manage API keys, model config, queue, metrics, debug tools, system settings, alerts, health dashboard, audit log, whitelist, promote/demote users, impersonate users. Cannot be blocked, deleted, or demoted via the API |
 
 > The owner account is set via `OWNER_EMAIL` in `.env` and is seeded to the database on every server startup.
 
@@ -368,7 +372,7 @@ Supports **system instructions**, **conversation history**, **multimodal images*
 | `model` | string | ❌ | Override model. Defaults to best available |
 | `temperature` | number (0–2) | ❌ | Creativity. Default: 1 |
 | `maxOutputTokens` | integer | ❌ | Max response length. Default: 8192 |
-| `systemInstruction` | string | ❌ | Sets the model's persona or behavior before any user turn |
+| `systemInstruction` | string (1–8192 chars) | ❌ | Sets the model's persona or behavior before any user turn |
 | `history` | array | ❌ | Prior conversation turns for multi-turn chat |
 | `thinkingBudget` | integer (0–24576) | ❌ | Token budget for model reasoning. `0` disables thinking |
 
@@ -456,6 +460,7 @@ Supports **system instructions**, **conversation history**, **multimodal images*
 
 - Maximum **16 images** per request
 - Maximum total body size: **20 MB**
+- Image URLs **must** use HTTPS
 
 ---
 
@@ -507,10 +512,11 @@ Any valid Gemini model string is accepted. The default fallback chain (admin-con
 
 | Status | `code` | Meaning |
 |---|---|---|
-| `400` | `BAD_REQUEST` | Missing prompt/images or invalid field |
+| `400` | `BAD_REQUEST` | Missing prompt/images, invalid field, non-HTTPS image URL |
 | `429` | `RATE_LIMIT_EXCEEDED` | Per-user rate limit reached |
 | `429` | `DAILY_LIMIT_EXCEEDED` | Daily plan quota hit |
 | `503` | `NO_KEYS` | All API keys are in cooldown |
+| `503` | `POOL_EXHAUSTED` | Key pool completely exhausted (circuit breaker tripped) |
 | `503` | `RETRIES_EXHAUSTED` | All retry attempts failed |
 | `503` | `GENERATION_DISABLED` | Generation turned off by admin |
 | `502` | `UPSTREAM_ERROR` | Network error reaching Gemini |
@@ -543,7 +549,69 @@ await fetch('/v1/generate', {
 
 ---
 
-## 6. Streaming
+## 6. Embeddings
+
+### `POST /v1/embeddings`
+
+Generate text embeddings using Gemini's embedding model.
+
+**Authentication required. Rate-limited.**
+
+#### Request fields
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `text` | string or string[] | ✅ | A single text string or an array of strings to embed |
+| `model` | string | ❌ | Override model. Default: `text-embedding-004` |
+
+#### Single text request
+```json
+{
+  "text": "What is machine learning?"
+}
+```
+
+#### Batch embedding request
+```json
+{
+  "text": [
+    "What is machine learning?",
+    "How does deep learning work?",
+    "Explain neural networks"
+  ]
+}
+```
+
+#### Success `200`
+
+```json
+{
+  "embedding": {
+    "values": [0.0123, -0.0456, 0.0789]
+  },
+  "model":      "text-embedding-004",
+  "request_id": "a1b2c3d4-...",
+  "retries":    0,
+  "latency_ms": 320
+}
+```
+
+For batch requests (array input), the response contains `embeddings` (array of embedding objects).
+
+#### Error responses
+
+| Status | `code` | Meaning |
+|---|---|---|
+| `400` | `BAD_REQUEST` | Missing or invalid `text` field |
+| `429` | `RATE_LIMIT_EXCEEDED` | Per-user rate limit reached |
+| `429` | `DAILY_LIMIT_EXCEEDED` | Daily plan quota hit |
+| `503` | `NO_KEYS` | All API keys are in cooldown |
+| `503` | `POOL_EXHAUSTED` | Key pool exhausted (circuit breaker) |
+| `502` | `UPSTREAM_ERROR` | Network error reaching Gemini |
+
+---
+
+## 7. Streaming
 
 ### `POST /v1/generate/stream`
 
@@ -556,13 +624,20 @@ Supports all the same fields: `systemInstruction`, `history`, `images`, `thinkin
 **Success response:**  
 HTTP `200` with headers:
 ```
-Content-Type:  text/event-stream
-Cache-Control: no-cache
-Connection:    keep-alive
-X-Request-Id:  <uuid>
+Content-Type:      text/event-stream
+Cache-Control:     no-cache, no-transform
+Connection:        keep-alive
+X-Accel-Buffering: no
+X-Request-Id:      <uuid>
+X-Model-Used:      <model-name>
 ```
 
 The body is a stream of SSE `data:` events. Each chunk is a partial Gemini JSON response.
+
+**In-stream error** (if the stream breaks mid-generation):
+```
+data: {"error":"Stream interrupted","code":"STREAM_ERROR"}
+```
 
 ### JavaScript Fetch (streaming)
 
@@ -605,19 +680,21 @@ async function streamGenerate(prompt, { systemInstruction, history } = {}) {
 }
 ```
 
-**Error responses** (JSON, not SSE):
+**Error responses** (JSON, not SSE — returned before streaming starts):
 
 | Status | `code` | Meaning |
 |---|---|---|
+| `400` | `BAD_REQUEST` | Missing prompt/images or invalid field |
 | `429` | `RATE_LIMIT_EXCEEDED` | Per-user rate limit reached |
-| `503` | `NO_KEYS` | No keys available |
-| `503` | `GENERATION_DISABLED` | Generation turned off by admin |
-| `504` | `TIMEOUT` | Request timed out |
+| `429` | `DAILY_LIMIT_EXCEEDED` | Daily plan quota hit |
 | `502` | `UPSTREAM_ERROR` | Network error |
+| `503` | `NO_KEYS` | No keys available |
+| `503` | `RETRIES_EXHAUSTED` | All retry attempts failed |
+| `503` | `GENERATION_DISABLED` | Generation turned off by admin |
 
 ---
 
-## 7. Batch Processing
+## 8. Batch Processing
 
 Use this when you need to process many prompts asynchronously. Jobs are queued in BullMQ and processed by background workers.
 
@@ -665,50 +742,45 @@ Use this when you need to process many prompts asynchronously. Jobs are queued i
 
 ---
 
-### Step 2 — Poll a single job
+### Step 2 — Poll the whole batch
 
-#### `GET /v1/generate/batch/:jobId`
+#### `GET /v1/queue/batch/:batchId`
 
-**Authentication required.**
+**Authentication required. Owner only** (non-owners can view batches they submitted).
 
-**Response `200`** (completed):
+**Response `200`:**
 ```json
 {
-  "job_id": "aaa-...",
-  "state":  "completed",
-  "result": {
-    "text":       "...",
-    "model":      "gemini-2.5-flash",
-    "request_id": "bbb-...",
-    "retries":    0,
-    "latency_ms": 712
+  "batch_id":  "f47ac10b-...",
+  "total":     3,
+  "completed": 2,
+  "failed":    0,
+  "pending":   1,
+  "jobs": [
+    { "job_id": "aaa-...", "prompt_index": 0, "state": "completed", "result": { "text": "..." } },
+    { "job_id": "ccc-...", "prompt_index": 1, "state": "active" }
+  ]
+}
+```
+
+**Response `403`:** If a non-owner tries to view someone else's batch.  
+**Response `404`:** Batch not found.
+
+**Polling pattern:**
+```js
+async function pollBatch(batchId, onProgress) {
+  while (true) {
+    const { data } = await api.get(`/v1/queue/batch/${batchId}`);
+    onProgress({ total: data.total, completed: data.completed, failed: data.failed });
+    if (data.pending === 0) return data;
+    await new Promise(r => setTimeout(r, 2000));
   }
 }
 ```
 
-**Response `200`** (failed):
-```json
-{
-  "job_id":   "aaa-...",
-  "state":    "failed",
-  "error":    "All retries exhausted",
-  "attempts": 8
-}
-```
-
 ---
 
-### Step 3 — Poll the whole batch
-
-#### `GET /v1/queue/batch/:batchId`
-
-**Authentication required. Admin only.**
-
-See [Queue Management](#14-admin--queue-management) for the response shape.
-
----
-
-## 8. User Management
+## 9. User Management
 
 ### `GET /v1/users/me`
 
@@ -800,7 +872,9 @@ List all registered users with optional filtering and search.
       "plan":       "free",
       "status":     "active",
       "limits":     { "max_requests_per_min": 60 },
-      "created_at": "2025-06-01T..."
+      "usage":      { "total_requests": 1200 },
+      "created_at": "2025-06-01T10:00:00.000Z",
+      "last_login": "2025-06-10T14:22:11.000Z"
     }
   ]
 }
@@ -812,120 +886,15 @@ List all registered users with optional filtering and search.
 
 Aggregate metrics across all users.
 
-**Authentication required. Admin only.**
-
-**Response `200`:**
-```json
-{
-  "total": 124,
-  "by_role": { "user": 120, "admin": 3, "owner": 1 },
-  "by_plan": { "free": 110, "premium": 14 },
-  "status":  { "active": 122, "blocked": 2 }
-}
-```
-
----
-
-### `POST /v1/users/bulk`
-
-Perform actions on multiple users at once.
-
-**Authentication required. Admin only.**
-
-**Request:**
-```json
-{
-  "emails": ["user1@example.com", "user2@example.com"],
-  "action": "block", // "block", "unblock", or "set_plan"
-  "plan":   "premium" // required for "set_plan"
-}
-```
-
----
-
-### `POST /v1/users/:email/impersonate`
-
-Create a short-lived (1h) token to access the API as another user.
-
-**Authentication required. Owner only.**
-
-**Response `200`:**
-```json
-{
-  "token":          "eyJhb...",
-  "expires_in":     "1h",
-  "impersonating": "user@example.com"
-}
-```
-
----
-
-### `PATCH /v1/users/:email/block`
-
-Manually block a user. Their session is invalidated immediately.
-
-**Authentication required. Admin only.**
-
----
-
-### `PATCH /v1/users/:email/limits`
-
-Set custom rate limit overrides for a specific user.
-
-**Authentication required. Admin only.**
-
-**Request:**
-```json
-{
-  "max_requests_per_min": 120,
-  "max_requests_per_day": 1000
-}
-```
-
----
-
-### `PATCH /v1/users/:email/role`
-
-Promote or demote a user.
-
-**Authentication required. Owner only.**
-
-**Request:**
-```json
-{ "role": "admin" } // "user" or "admin"
-```
-
----
-
-### `DELETE /v1/users/:email`
-
-Permanently remove a user and their data.
-
-**Authentication required. Admin only.**
-      "usage":      { "total_requests": 1200 },
-      "created_at": "2025-06-01T10:00:00.000Z",
-      "last_login": "2025-06-10T14:22:11.000Z"
-    }
-  ],
-  "total": 42
-}
-```
-
----
-
-### `GET /v1/users/stats`
-
-Aggregate user counts broken down by role, plan, and status.
-
 **Authentication required. Admin or owner.**
 
 **Response `200`:**
 ```json
 {
-  "total": 142,
-  "by_role":   { "user": 138, "admin": 3, "owner": 1 },
-  "by_plan":   { "free": 120, "premium": 22 },
-  "by_status": { "active": 140, "blocked": 2 }
+  "total": 124,
+  "by_role":   { "user": 120, "admin": 3, "owner": 1 },
+  "by_plan":   { "free": 110, "premium": 14 },
+  "by_status": { "active": 122, "blocked": 2 }
 }
 ```
 
@@ -977,7 +946,7 @@ For `set_plan` action, also include `plan`:
 |---|---|---|---|
 | `emails` | string[] | ✅ | 1–100 email addresses |
 | `action` | string | ✅ | `block`, `unblock`, `set_plan` |
-| `plan` | string | ❌ | Required only for `set_plan` |
+| `plan` | string | ❌ | Required only for `set_plan`. Values: `free`, `premium` |
 
 **Response `200`:**
 ```json
@@ -988,6 +957,9 @@ For `set_plan` action, also include `plan`:
   "emails": ["alice@example.com", "bob@example.com"]
 }
 ```
+
+**Error `400`** (`MISSING_PLAN`): `set_plan` action without `plan` field.  
+**Error `400`** (`NO_ELIGIBLE_USERS`): All target users were skipped.
 
 ---
 
@@ -1058,7 +1030,7 @@ Set per-user rate limits. Takes effect immediately (Redis cache is invalidated).
 }
 ```
 
-Either or both fields may be sent.
+Either or both fields may be sent. No additional properties allowed.
 
 **Response `200`:**
 ```json
@@ -1111,7 +1083,7 @@ Valid values: `"free"`, `"premium"`
 
 **Response `200`:**
 ```json
-{ "updated": true, "email": "user@example.com", "plan": "premium" }
+{ "updated": true, "email": "user@example.com", "plan": "premium", "premium_expires_at": "2026-05-21T..." }
 ```
 
 ---
@@ -1128,7 +1100,7 @@ Cannot delete yourself or the owner account.
 
 ---
 
-## 9. Support Tickets
+## 10. Support Tickets
 
 Users can raise support tickets. Admins can view, search, and respond to all tickets.
 
@@ -1150,20 +1122,7 @@ Create a new support ticket.
 | `subject` | string | ✅ | 3–200 chars |
 | `description` | string | ✅ | 10–5000 chars |
 | `priority` | string | ❌ | `low`, `medium`, `high`. Default: `medium` |
-| `screenshot` | file | ❌ | JPG, PNG, WebP or GIF format (Max 100MB) |
-
----
-
-### `GET /v1/tickets/:id/screenshot`
-
-Download or view the screenshot attached to a ticket.
-
-**Authentication required.**
-
-- **Users** can only view screenshots for their own tickets.
-- **Admins/owner** can view any attachment.
-
-**Response `200`:** The image file (binary stream).
+| `screenshot` | file | ❌ | JPG, JPEG, PNG, WebP, or GIF format. Stored in GridFS. |
 
 **Response `201`:**
 ```json
@@ -1178,6 +1137,39 @@ Download or view the screenshot attached to a ticket.
   "admin_notes":    null,
   "created_at":     "2025-06-10T14:22:11.000Z",
   "updated_at":     "2025-06-10T14:22:11.000Z"
+}
+```
+
+---
+
+### `GET /v1/tickets/:id/screenshot`
+
+Download or view the screenshot attached to a ticket.
+
+**Authentication required.**
+
+- **Users** can only view screenshots for their own tickets.
+- **Admins/owner** can view any attachment.
+
+**Response `200`:** The image file (binary stream with appropriate Content-Type).
+
+**Response `403`:** Forbidden (not your ticket).  
+**Response `404`:** Ticket not found or no screenshot attached.
+
+---
+
+### `GET /v1/tickets/stats`
+
+Aggregate ticket counts broken down by status and priority.
+
+**Authentication required. Admin or owner.**
+
+**Response `200`:**
+```json
+{
+  "total": 48,
+  "by_status":   { "open": 12, "in_progress": 5, "resolved": 25, "closed": 6 },
+  "by_priority": { "low": 10, "medium": 28, "high": 10 }
 }
 ```
 
@@ -1201,7 +1193,7 @@ List tickets.
 | `limit` | integer | `50` | Max results (1–200) |
 | `skip` | integer | `0` | Offset |
 | `email` | string | — | **Admin only.** Filter by user email |
-| `search` | string | — | **Admin only.** Full-text search in subject + description |
+| `search` | string | — | **Admin only.** Full-text search in subject + description (max 100 chars) |
 | `from` | ISO string | — | **Admin only.** Created on or after this date |
 | `to` | ISO string | — | **Admin only.** Created on or before this date |
 
@@ -1222,23 +1214,6 @@ List tickets.
     }
   ],
   "total": 12
-}
-```
-
----
-
-### `GET /v1/tickets/stats`
-
-Aggregate ticket counts broken down by status and priority.
-
-**Authentication required. Admin or owner.**
-
-**Response `200`:**
-```json
-{
-  "total": 48,
-  "by_status":   { "open": 12, "in_progress": 5, "resolved": 25, "closed": 6 },
-  "by_priority": { "low": 10, "medium": 28, "high": 10 }
 }
 ```
 
@@ -1285,7 +1260,7 @@ Update ticket status, priority, add an admin response, or add internal notes.
 | `priority` | string | `low`, `medium`, `high` |
 | `admin_notes` | string | **Internal only** — not visible to the user (up to 2000 chars) |
 
-At least one field is required. All fields are optional individually.
+At least one field is required. All fields are optional individually. No additional properties allowed.
 
 **Response `200`:** Updated ticket object.
 
@@ -1315,6 +1290,8 @@ Bulk close or resolve multiple tickets at once.
 | `ids` | string[] | ✅ | 1–100 ticket IDs |
 | `status` | string | ✅ | `resolved` or `closed` |
 
+No additional properties allowed.
+
 **Response `200`:**
 ```json
 { "matched": 3, "modified": 3 }
@@ -1326,13 +1303,13 @@ Bulk close or resolve multiple tickets at once.
 
 Delete a ticket permanently.
 
-**Authentication required. Admin or owner.**
+**Authentication required. Owner only.**
 
 **Response `204`:** No content.
 
 ---
 
-## 10. Tools
+## 11. Tools Marketplace
 
 Tools are downloadable resources (ZIP files or external links) that admins publish for users to discover and download from within the platform. All authenticated users can browse the catalogue and download entries. Admins manage the full lifecycle: create, update, toggle visibility, and delete.
 
@@ -1363,7 +1340,7 @@ List all tools. Regular users see only **active** tools. Admins and owners see a
 ```json
 {
   "total": 6,
-  "items": [
+  "tools": [
     {
       "id":             "64f1a2b3c4d5e6f7a8b9c0d1",
       "name":           "CSV Formatter",
@@ -1385,7 +1362,7 @@ List all tools. Regular users see only **active** tools. Admins and owners see a
 }
 ```
 
-> `icon` is either a base64 data URL (`data:image/png;base64,...`) or an external image URL. It is `null` if no icon was provided.
+> `icon` is either a base64 data URL (`data:image/png;base64,...`) or an external image URL. It is `null` if no icon was provided.  
 > The server-side `file_path` is never exposed — only `file_name` and `file_size` are returned.
 
 ---
@@ -1413,6 +1390,8 @@ Download a tool. The `download_count` is incremented on **every** call.
 
 **Authentication required. Any role.**
 
+Non-admin users cannot download inactive tools.
+
 Behaviour depends on the tool's `type`:
 
 | `type` | Behaviour |
@@ -1435,6 +1414,11 @@ Content-Length:      204800
 **Error `404`** (file missing on server disk):
 ```json
 { "error": "Tool file not found on server", "code": "FILE_NOT_FOUND" }
+```
+
+**Error `502`** (external URL not configured):
+```json
+{ "error": "No external URL configured for this tool", "code": "NO_EXTERNAL_URL" }
 ```
 
 **Frontend notes:**
@@ -1468,7 +1452,7 @@ async function downloadTool(toolId, filename) {
 
 Create a new tool entry. Supports two modes depending on the `Content-Type` sent.
 
-**Authentication required. Admin or owner.**
+**Authentication required. Owner only.**
 
 ---
 
@@ -1550,7 +1534,7 @@ Send a normal JSON body with an external download URL instead of a file.
 
 Update tool metadata. Only fields present in the request body are changed.
 
-**Authentication required. Admin or owner.**
+**Authentication required. Owner only.**
 
 **Request** (any combination of fields):
 ```json
@@ -1573,6 +1557,8 @@ Update tool metadata. Only fields present in the request body are changed.
 | `version` | string | Max 50 chars |
 | `tags` | string[] | Replaces the entire tags array |
 
+No additional properties allowed. At least one field required.
+
 **Response `200`:** Updated full tool object.
 
 **Response `404`:**
@@ -1586,7 +1572,7 @@ Update tool metadata. Only fields present in the request body are changed.
 
 Toggle a tool's active state. Inactive tools are hidden from regular users — all user-facing endpoints return `404` for them.
 
-**Authentication required. Admin or owner.**
+**Authentication required. Owner only.**
 
 **Response `200`:**
 ```json
@@ -1599,20 +1585,22 @@ Toggle a tool's active state. Inactive tools are hidden from regular users — a
 
 Permanently delete a tool. For ZIP-type tools the file is also removed from the server's disk.
 
-**Authentication required. Admin or owner.**
+**Authentication required. Owner only.**
 
 **Response `204`:** No content.
 
 ---
 
-## 11. Analytics & Logs
+## 12. Analytics & Logs
 
 ### `GET /v1/logs`
 
 Paginated request history.
 
 - **Users** see only their own requests.
-- **Admins/owner** see all requests.
+- **Owner** sees all requests.
+
+**Authentication required.**
 
 **Query parameters:**
 
@@ -1652,7 +1640,7 @@ Paginated request history.
 
 Download request logs as a CSV file.
 
-**Authentication required. Admin or owner.**
+**Authentication required. Owner only.**
 
 **Query parameters:**
 
@@ -1671,13 +1659,13 @@ Columns: `request_id`, `user_email`, `model`, `status`, `latency_ms`, `retries`,
 
 Purge request logs older than N days.
 
-**Authentication required. Admin or owner.**
+**Authentication required. Owner only.**
 
 **Query parameters:**
 
 | Param | Type | Default | Description |
 |---|---|---|---|
-| `older_than_days` | integer | `30` | Delete logs older than this many days |
+| `older_than_days` | integer | `30` | Delete logs older than this many days (minimum 1) |
 
 **Response `200`:**
 ```json
@@ -1693,7 +1681,7 @@ Purge request logs older than N days.
 
 Paginated error log.
 
-**Authentication required. Admin or owner.**
+**Authentication required. Owner only.**
 
 **Query parameters:**
 
@@ -1726,7 +1714,9 @@ Paginated error log.
 Aggregated statistics.
 
 - **Users** see their own stats only.
-- **Admins/owner** see global stats.
+- **Owner** sees global stats.
+
+**Authentication required.**
 
 **Response `200`:**
 ```json
@@ -1761,7 +1751,7 @@ Aggregated statistics.
 
 Request counts over time, bucketed by hour or day.
 
-**Authentication required. Admin or owner.**
+**Authentication required. Owner only.**
 
 **Query parameters:**
 
@@ -1793,7 +1783,7 @@ Request counts over time, bucketed by hour or day.
 
 Per-user usage breakdown for the top N most active users.
 
-**Authentication required. Admin or owner.**
+**Authentication required. Owner only.**
 
 **Query parameters:**
 
@@ -1825,7 +1815,7 @@ Per-user usage breakdown for the top N most active users.
 
 Error breakdown by type and model, with the 10 most recent errors.
 
-**Authentication required. Admin or owner.**
+**Authentication required. Owner only.**
 
 **Query parameters:**
 
@@ -1847,13 +1837,15 @@ Error breakdown by type and model, with the 10 most recent errors.
 
 ---
 
-## 12. Admin — Key Management
+## 13. Admin — Key Management
 
-Admin/owner only. Manage the Gemini API key pool. Keys are always **masked** in responses (first 4 + `****` + last 4).
+Owner only. Manage the Gemini API key pool. Keys are always **masked** in responses (first 4 + `****` + last 4).
 
 ### `GET /v1/keys`
 
 List all keys and their statuses.
+
+**Authentication required. Owner only.**
 
 **Response `200`:**
 ```json
@@ -1874,6 +1866,8 @@ List all keys and their statuses.
 
 Current key pool statistics broken down by state.
 
+**Authentication required. Owner only.**
+
 **Response `200`:**
 ```json
 {
@@ -1889,6 +1883,8 @@ Current key pool statistics broken down by state.
 ### `POST /v1/keys`
 
 Add one or more API keys to the pool.
+
+**Authentication required. Owner only.**
 
 **Request:**
 ```json
@@ -1911,6 +1907,10 @@ Add one or more API keys to the pool.
 
 Move a cooled-down or disabled key back to active.
 
+**Authentication required. Owner only.**
+
+**`:key`** = URL-encoded raw API key string.
+
 **Response `200`:**
 ```json
 { "status": "enabled", "key": "AIza****abcd" }
@@ -1922,6 +1922,8 @@ Move a cooled-down or disabled key back to active.
 
 Permanently disable a key.
 
+**Authentication required. Owner only.**
+
 **Response `200`:**
 ```json
 { "status": "disabled", "key": "AIza****abcd" }
@@ -1932,6 +1934,8 @@ Permanently disable a key.
 ### `POST /v1/keys/bulk-enable`
 
 Enable multiple keys in one request.
+
+**Authentication required. Owner only.**
 
 **Request:**
 ```json
@@ -1953,6 +1957,8 @@ Enable multiple keys in one request.
 ### `POST /v1/keys/bulk-disable`
 
 Disable multiple keys in one request.
+
+**Authentication required. Owner only.**
 
 **Request:**
 ```json
@@ -1976,6 +1982,8 @@ Disable multiple keys in one request.
 Restore all temporarily cooled-down keys to active immediately.  
 Permanently disabled keys are **not** affected.
 
+**Authentication required. Owner only.**
+
 **Response `200`:**
 ```json
 { "restored": 3 }
@@ -1986,6 +1994,8 @@ Permanently disabled keys are **not** affected.
 ### `GET /v1/keys/:key/stats`
 
 Usage statistics for a specific key (queried by masked key string).
+
+**Authentication required. Owner only.**
 
 **`:key`** = masked key, e.g. `AIza****abcd` (URL-encode the `*`: `AIza%2A%2A%2A%2Aabcd`)
 
@@ -2003,33 +2013,22 @@ Usage statistics for a specific key (queried by masked key string).
 
 ---
 
-## 13. Admin — Model Config & Health
+## 14. Admin — Model Config & Health
 
-Admin/owner only. Manage the primary model, fallback chain, and view live health metrics.
+Owner only. Manage the primary model, fallback chain, image models, and view live health metrics.
 
-### `GET /v1/models/config`
+### `GET /v1/models/available`
 
-View the primary model and the ordered fallback list.
+Returns a flat array of all known model names (from health data + config chain). Useful for populating dropdowns.
+
+**Authentication required. Any role.**
 
 **Response `200`:**
 ```json
 {
-  "primary_model": "gemini-3-flash-preview",
-  "fallback_models": ["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+  "models": ["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
 }
 ```
-
----
-
-### `PATCH /v1/models/config`
-
-Update the primary model or replace the entire fallback chain.
-
----
-
-### `POST /v1/models/config/fallback`
-
-Add a model to the fallback chain.
 
 ---
 
@@ -2037,17 +2036,16 @@ Add a model to the fallback chain.
 
 Live health stats for all models that have processed at least one request.
 
+**Authentication required. Owner only.**
+
 **Response `200`:**
 ```json
 {
   "models": [
     {
       "model":          "gemini-2.5-flash",
-      "success":        4820,
-      "fail_503":       12,
-      "fail_timeout":   3,
-      "fail_other":     5,
-      "success_rate":   0.9959,
+      "success_count":  4820,
+      "failure_count":  20,
       "avg_latency_ms": 720,
       "last_updated":   "2025-06-10T14:22:11.000Z"
     }
@@ -2061,6 +2059,10 @@ Live health stats for all models that have processed at least one request.
 
 Stats for a single model.
 
+**Authentication required. Owner only.**
+
+**Response `200`:** Single model stats object.
+
 **Response `404`:**
 ```json
 { "error": "No data for this model yet" }
@@ -2072,6 +2074,8 @@ Stats for a single model.
 
 Reset health counters for a model.
 
+**Authentication required. Owner only.**
+
 **Request:**
 ```json
 { "action": "reset" }
@@ -2082,11 +2086,15 @@ Reset health counters for a model.
 { "status": "reset", "model": "gemini-2.5-flash" }
 ```
 
+**Response `400`** (`BAD_ACTION`): Unknown action value.
+
 ---
 
 ### `GET /v1/models/config`
 
 View the current primary model and ordered fallback chain.
+
+**Authentication required. Owner only.**
 
 **Response `200`:**
 ```json
@@ -2109,6 +2117,8 @@ View the current primary model and ordered fallback chain.
 
 Replace the fallback chain. Changes take effect immediately.
 
+**Authentication required. Owner only.**
+
 **Request** (either or both fields):
 ```json
 {
@@ -2122,6 +2132,8 @@ Replace the fallback chain. Changes take effect immediately.
 | `primary_model` | string | Moves this model to position 0. Adds it if absent. |
 | `fallback_models` | string[] | Replaces the entire chain (min 1 item). Order matters. |
 
+At least one field required.
+
 **Response `200`:** Updated config (same shape as `GET /v1/models/config`).
 
 ---
@@ -2130,6 +2142,8 @@ Replace the fallback chain. Changes take effect immediately.
 
 Add a model to the fallback chain without replacing the whole list.
 
+**Authentication required. Owner only.**
+
 **Request:**
 ```json
 { "model": "gemini-2.5-pro", "position": "start" }
@@ -2137,7 +2151,7 @@ Add a model to the fallback chain without replacing the whole list.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `model` | string | — | Model name to add |
+| `model` | string | — | Model name to add (required) |
 | `position` | `"start"` \| `"end"` | `"end"` | `"start"` = highest priority, `"end"` = last resort |
 
 **Response `200`:**
@@ -2161,6 +2175,8 @@ Add a model to the fallback chain without replacing the whole list.
 
 Remove a model from the fallback chain.
 
+**Authentication required. Owner only.**
+
 **Response `200`:**
 ```json
 {
@@ -2171,15 +2187,63 @@ Remove a model from the fallback chain.
 }
 ```
 
+**Response `404`:**
+```json
+{ "error": "Model not in fallback list", "code": "NOT_FOUND", "model": "gemini-2.5-flash-lite" }
+```
+
 ---
 
-## 14. Admin — Queue Management
+### `GET /v1/models/config/image`
 
-Admin/owner only.
+View the configured image generation models.
+
+**Authentication required. Owner only.**
+
+**Response `200`:**
+```json
+{
+  "image_models": ["gemini-2.0-flash-preview-image-generation"]
+}
+```
+
+---
+
+### `PUT /v1/models/config/image`
+
+Replace the entire image models list.
+
+**Authentication required. Owner only.**
+
+**Request:**
+```json
+{
+  "image_models": ["gemini-2.0-flash-preview-image-generation", "imagen-3.0-generate-002"]
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `image_models` | string[] | ✅ | At least 1 model. Replaces the entire list. |
+
+**Response `200`:**
+```json
+{
+  "image_models": ["gemini-2.0-flash-preview-image-generation", "imagen-3.0-generate-002"]
+}
+```
+
+---
+
+## 15. Admin — Queue Management
+
+Owner only.
 
 ### `GET /v1/queue/status`
 
 Overview of the BullMQ batch queue.
+
+**Authentication required. Owner only.**
 
 **Response `200`:**
 ```json
@@ -2198,42 +2262,11 @@ Overview of the BullMQ batch queue.
 
 ---
 
-### `GET /v1/queue/batch/:batchId`
-
-Status of all jobs in a batch.
-
-**Response `200`:**
-```json
-{
-  "batch_id":  "f47ac10b-...",
-  "total":     3,
-  "completed": 2,
-  "failed":    0,
-  "pending":   1,
-  "jobs": [
-    { "job_id": "aaa-...", "prompt_index": 0, "state": "completed", "result": { "text": "..." } },
-    { "job_id": "ccc-...", "prompt_index": 1, "state": "active" }
-  ]
-}
-```
-
-**Polling pattern:**
-```js
-async function pollBatch(batchId, onProgress) {
-  while (true) {
-    const { data } = await api.get(`/v1/queue/batch/${batchId}`);
-    onProgress({ total: data.total, completed: data.completed, failed: data.failed });
-    if (data.pending === 0) return data;
-    await new Promise(r => setTimeout(r, 2000));
-  }
-}
-```
-
----
-
 ### `POST /v1/queue/pause`
 
 Pause the queue — workers stop picking up new jobs. Already-running jobs complete normally.
+
+**Authentication required. Owner only.**
 
 **Response `200`:**
 ```json
@@ -2246,6 +2279,8 @@ Pause the queue — workers stop picking up new jobs. Already-running jobs compl
 
 Resume a paused queue.
 
+**Authentication required. Owner only.**
+
 **Response `200`:**
 ```json
 { "paused": false }
@@ -2257,6 +2292,8 @@ Resume a paused queue.
 
 Retry all currently failed jobs.
 
+**Authentication required. Owner only.**
+
 **Response `200`:**
 ```json
 { "retried": 4 }
@@ -2267,6 +2304,8 @@ Retry all currently failed jobs.
 ### `POST /v1/queue/jobs/:jobId/retry`
 
 Retry a single failed job by its ID.
+
+**Authentication required. Owner only.**
 
 **Response `200`:**
 ```json
@@ -2284,6 +2323,8 @@ Retry a single failed job by its ID.
 
 Remove all failed jobs from the queue.
 
+**Authentication required. Owner only.**
+
 **Response `200`:**
 ```json
 { "drained": 6 }
@@ -2295,6 +2336,8 @@ Remove all failed jobs from the queue.
 
 Remove all completed jobs from the queue (free memory).
 
+**Authentication required. Owner only.**
+
 **Response `200`:**
 ```json
 { "drained": 1240 }
@@ -2302,13 +2345,15 @@ Remove all completed jobs from the queue (free memory).
 
 ---
 
-## 15. Admin — System Control
+## 16. Admin — System Control
 
-Admin/owner only. Configure live runtime behaviour without restarting the server.
+Owner only. Configure live runtime behaviour without restarting the server.
 
 ### `GET /v1/admin/system`
 
 View all current system flags and configuration.
+
+**Authentication required. Owner only.**
 
 **Response `200`:**
 ```json
@@ -2321,7 +2366,9 @@ View all current system flags and configuration.
   "alert_queue_threshold":   100,
   "alert_pool_low_threshold":5,
   "gen_temperature":         null,
-  "gen_max_tokens":          null
+  "gen_max_tokens":          null,
+  "max_sessions_user":       1,
+  "max_sessions_admin":      3
 }
 ```
 
@@ -2331,13 +2378,17 @@ View all current system flags and configuration.
 
 Update one or more runtime flags. Changes take effect immediately for all new requests.
 
+**Authentication required. Owner only.**
+
 **Request** (any combination of fields):
 ```json
 {
   "maintenance_mode":     true,
   "generation_enabled":   false,
   "registration_enabled": false,
-  "default_per_min":      120
+  "default_per_min":      120,
+  "max_sessions_user":    2,
+  "max_sessions_admin":   5
 }
 ```
 
@@ -2346,12 +2397,16 @@ Update one or more runtime flags. Changes take effect immediately for all new re
 | `maintenance_mode` | boolean | `true` = all non-admin `/v1/*` requests get `503 MAINTENANCE_MODE` |
 | `generation_enabled` | boolean | `false` = generate/stream/batch return `503 GENERATION_DISABLED` for everyone including admins |
 | `registration_enabled` | boolean | `false` = `/auth/login` returns `503 REGISTRATION_DISABLED` |
-| `default_per_min` | integer | Global per-minute rate limit for all users without a custom override. Busts all user caches immediately. |
-| `alert_failure_threshold` | integer | Failures per 5-min window that trigger a high-failure-rate alert email |
-| `alert_queue_threshold` | integer | Queue waiting jobs count that triggers a backlog alert email |
-| `alert_pool_low_threshold` | integer | Active key count that triggers a key-pool-low alert email |
+| `default_per_min` | integer (≥1) | Global per-minute rate limit for all users without a custom override. Busts all user caches immediately. |
+| `alert_failure_threshold` | integer (≥1) | Failures per 5-min window that trigger a high-failure-rate alert email |
+| `alert_queue_threshold` | integer (≥1) | Queue waiting jobs count that triggers a backlog alert email |
+| `alert_pool_low_threshold` | integer (≥1) | Active key count that triggers a key-pool-low alert email |
 | `gen_temperature` | number (0–2) | Override generation temperature for all requests (`null` = use model default) |
-| `gen_max_tokens` | integer | Override max output tokens for all requests (`null` = use model default) |
+| `gen_max_tokens` | integer (≥1) | Override max output tokens for all requests (`null` = use model default) |
+| `max_sessions_user` | integer (≥1) | Maximum concurrent sessions allowed per user-role account |
+| `max_sessions_admin` | integer (≥1) | Maximum concurrent sessions allowed per admin-role account |
+
+At least one field required. No additional properties allowed.
 
 **Response `200`:**
 ```json
@@ -2363,6 +2418,8 @@ Update one or more runtime flags. Changes take effect immediately for all new re
 ### `GET /v1/admin/system/plan-limits`
 
 View current daily request limits for each plan (may differ from code defaults if admin has updated them).
+
+**Authentication required. Owner only.**
 
 **Response `200`:**
 ```json
@@ -2378,6 +2435,8 @@ View current daily request limits for each plan (may differ from code defaults i
 
 Change a plan's daily request limit. Takes effect immediately for all users on that plan (busts all Redis caches).
 
+**Authentication required. Owner only.**
+
 **Request:**
 ```json
 {
@@ -2385,6 +2444,11 @@ Change a plan's daily request limit. Takes effect immediately for all users on t
   "daily_requests": 10
 }
 ```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `plan` | string | ✅ | `free` or `premium` |
+| `daily_requests` | integer (≥1) | ✅ | New daily request limit |
 
 **Response `200`:**
 ```json
@@ -2404,6 +2468,8 @@ Change a plan's daily request limit. Takes effect immediately for all users on t
 
 List all whitelist rules. When the list is non-empty, only matching emails or domains can sign in.
 
+**Authentication required. Owner only.**
+
 **Response `200`:**
 ```json
 [
@@ -2420,6 +2486,8 @@ List all whitelist rules. When the list is non-empty, only matching emails or do
 
 Add a whitelist rule.
 
+**Authentication required. Owner only.**
+
 **Request:**
 ```json
 {
@@ -2432,8 +2500,10 @@ Add a whitelist rule.
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `type` | string | ✅ | `email` — exact address · `domain` — everyone at this domain |
-| `value` | string | ✅ | The email address or domain name |
+| `value` | string | ✅ | The email address or domain name (1–200 chars) |
 | `note` | string | ❌ | Internal description (up to 500 chars) |
+
+No additional properties allowed.
 
 **Response `201`:**
 ```json
@@ -2450,6 +2520,8 @@ Add a whitelist rule.
 ### `DELETE /v1/admin/whitelist`
 
 Remove a whitelist rule.
+
+**Authentication required. Owner only.**
 
 **Request:**
 ```json
@@ -2472,11 +2544,23 @@ Remove a whitelist rule.
 
 Update the UPI IDs for manual payments.
 
-**Authentication required. Admin only.**
+**Authentication required. Owner only.**
 
 **Request:**
 ```json
 { "upi_1": "user@upi", "upi_2": "9876543210@paytm" }
+```
+
+| Field | Type | Constraints |
+|---|---|---|
+| `upi_1` | string | Max 100 chars |
+| `upi_2` | string | Max 100 chars |
+
+No additional properties allowed.
+
+**Response `200`:**
+```json
+{ "updated": true, "upi_1": "user@upi", "upi_2": "9876543210@paytm" }
 ```
 
 ---
@@ -2485,9 +2569,27 @@ Update the UPI IDs for manual payments.
 
 Upload a QR code image for manual payments.
 
-**Authentication required. Admin only.**
+**Authentication required. Owner only.**
 
-**Request:** `multipart/form-data` with an image file.
+**Request:** `multipart/form-data` with an image file (JPG, JPEG, PNG, or WebP). Stored in GridFS.
+
+**Response `200`:**
+```json
+{ "success": true, "filename": "payment-qr.png", "fileId": "64f1..." }
+```
+
+---
+
+### `DELETE /v1/admin/system/payment-qr`
+
+Delete the uploaded payment QR code.
+
+**Authentication required. Owner only.**
+
+**Response `200`:**
+```json
+{ "success": true }
+```
 
 ---
 
@@ -2495,25 +2597,67 @@ Upload a QR code image for manual payments.
 
 View status of email notification toggles.
 
-**Authentication required. Admin only.**
+**Authentication required. Owner only.**
+
+**Response `200`:**
+```json
+{
+  "security":     true,
+  "status":       true,
+  "tickets":      true,
+  "quota":        true,
+  "admin_health": true,
+  "otp":          true
+}
+```
+
+> `otp` is always `true` and cannot be toggled — OTP emails are always sent.
 
 ---
 
 ### `PATCH /v1/admin/system/emails`
 
-Toggle specific email notifications (Security, Status, Tickets, Quota, Admin Health).
+Toggle specific email notifications.
 
-**Authentication required. Admin only.**
+**Authentication required. Owner only.**
+
+**Request:**
+```json
+{
+  "security":     true,
+  "status":       false,
+  "tickets":      true,
+  "quota":        true,
+  "admin_health": false
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `security` | boolean | Login/session security emails |
+| `status` | boolean | Account status change emails |
+| `tickets` | boolean | Ticket response/closure emails |
+| `quota` | boolean | Quota warning emails |
+| `admin_health` | boolean | Admin health alert emails |
+
+No additional properties allowed.
+
+**Response `200`:**
+```json
+{ "updated": true, "security": true, "status": false, "tickets": true, "quota": true, "admin_health": false }
+```
 
 ---
 
-## 16. Admin — Alerts & Notifications
+## 17. Admin — Alerts & Notifications
 
-Admin/owner only. Manage alert throttles and notification configuration.
+Owner only. Manage alert throttles and notification configuration.
 
 ### `GET /v1/admin/alerts/throttles`
 
 View all active alert throttle keys. Each key prevents the same alert type from firing again until its TTL expires.
+
+**Authentication required. Owner only.**
 
 **Response `200`:**
 ```json
@@ -2532,6 +2676,8 @@ View all active alert throttle keys. Each key prevents the same alert type from 
 
 Clear **all** alert throttle keys — re-arms every alert type so they can fire again immediately.
 
+**Authentication required. Owner only.**
+
 **Response `200`:**
 ```json
 { "cleared": 3 }
@@ -2543,16 +2689,22 @@ Clear **all** alert throttle keys — re-arms every alert type so they can fire 
 
 Clear a single throttle key. `:key` is the part after `alert:`, e.g. `no_keys`.
 
+**Authentication required. Owner only.**
+
 **Response `200`:**
 ```json
 { "cleared": 1, "key": "alert:no_keys" }
 ```
+
+**Response `404`:** Key not found.
 
 ---
 
 ### `GET /v1/admin/alerts/thresholds`
 
 View the current alert threshold values.
+
+**Authentication required. Owner only.**
 
 **Response `200`:**
 ```json
@@ -2569,6 +2721,8 @@ View the current alert threshold values.
 
 Update alert thresholds. Changes take effect on the next check interval.
 
+**Authentication required. Owner only.**
+
 **Request:**
 ```json
 {
@@ -2577,6 +2731,8 @@ Update alert thresholds. Changes take effect on the next check interval.
   "alert_pool_low_threshold": 3
 }
 ```
+
+At least one field required. No additional properties allowed.
 
 **Response `200`:**
 ```json
@@ -2589,6 +2745,8 @@ Update alert thresholds. Changes take effect on the next check interval.
 
 Send a test email to the owner address to verify email delivery is working.
 
+**Authentication required. Owner only.**
+
 **Response `200`:**
 ```json
 { "sent": true, "to": "owner@example.com" }
@@ -2599,33 +2757,43 @@ Send a test email to the owner address to verify email delivery is working.
 { "error": "OWNER_EMAIL not configured — cannot send test email" }
 ```
 
+**Response `502`:** Email delivery failed.
+
 ---
 
 ### `POST /v1/admin/alerts/daily-summary`
 
 Trigger the daily summary email on-demand (same email that normally fires at 08:00 UTC).
 
+**Authentication required. Owner only.**
+
 **Response `200`:**
 ```json
 { "triggered": true }
 ```
 
+**Response `422`:** `OWNER_EMAIL` not configured.
+
 > The email is sent asynchronously — the response returns immediately.
 
 ---
 
-## 17. Admin — Health Dashboard
+## 18. Admin — Health Dashboard
 
-Admin/owner only.
+Owner only.
 
 ### `GET /v1/admin/health`
 
-Full system health snapshot — MongoDB, Redis, key pool, queue, failure rate, and system config in one call.
+Full system health snapshot — MongoDB, Redis, key pool, queue, latency metrics, failure rate, and system config in one call.
+
+**Authentication required. Owner only.**
 
 **Response `200`:**
 ```json
 {
   "timestamp": "2025-06-10T14:22:11.000Z",
+  "pulse": "healthy",
+  "load_pct": 25,
   "mongo": {
     "status":       "up",
     "user_count":   142,
@@ -2651,6 +2819,10 @@ Full system health snapshot — MongoDB, Redis, key pool, queue, failure rate, a
     "delayed":   0,
     "paused":    0
   },
+  "latency": {
+    "queue_wait":  { "p50": 12, "p95": 45, "p99": 120, "mean": 18 },
+    "generation":  { "p50": 650, "p95": 2100, "p99": 4500, "mean": 780 }
+  },
   "failure_rate": {
     "last_5_min":      3,
     "alert_threshold": 10
@@ -2659,10 +2831,20 @@ Full system health snapshot — MongoDB, Redis, key pool, queue, failure rate, a
     "maintenance_mode":     false,
     "generation_enabled":   true,
     "registration_enabled": true,
-    "default_per_min":      60
+    "default_per_min":      60,
+    "worker_concurrency":   5
   }
 }
 ```
+
+**Field details:**
+
+| Field | Description |
+|---|---|
+| `pulse` | System health: `"healthy"`, `"degraded"` (failures > threshold or worker load > 90%), or `"critical"` (failures > 2× threshold) |
+| `load_pct` | Worker load percentage (active jobs / concurrency × 100, capped at 100) |
+| `latency.queue_wait` | Queue wait time percentiles from Prometheus metrics |
+| `latency.generation` | Generation latency percentiles from Prometheus metrics |
 
 **Frontend notes:**
 - Any sub-object may have `{ "status": "error", "error": "..." }` if that component is unreachable
@@ -2671,13 +2853,15 @@ Full system health snapshot — MongoDB, Redis, key pool, queue, failure rate, a
 
 ---
 
-## 18. Admin — Audit Log
+## 19. Admin — Audit Log
 
-Admin/owner only. Every sensitive admin action is recorded.
+Owner only. Every sensitive admin action is recorded.
 
 ### `GET /v1/admin/audit-log`
 
 Query the audit log with optional filters and pagination.
+
+**Authentication required. Owner only.**
 
 **Query parameters:**
 
@@ -2748,30 +2932,50 @@ Query the audit log with optional filters and pagination.
 
 ---
 
-## 19. Admin — Batch Tools
+## 20. Payment & Public System Routes
 
-Admin/owner only. Specialized tools for managing batch jobs.
+These endpoints do **not** require authentication.
 
-### `POST /v1/generate/batch`
+### `GET /v1/system/payment-details`
 
-Submit a large batch of prompts for background processing.
+Get the configured UPI payment details and QR code availability.
+
+**No authentication required.**
 
 **Response `200`:**
 ```json
 {
-  "batch_id": "uuid",
-  "total": 50,
-  "status_url": "/v1/queue/batch/uuid"
+  "upi_1":  "user@upi",
+  "upi_2":  "9876543210@paytm",
+  "has_qr": true,
+  "qr_id":  "64f1a2b3..."
 }
+```
+
+> `has_qr` is `false` and `qr_id` is `null` if no QR code has been uploaded.
+
+---
+
+### `GET /v1/system/payment-qr`
+
+Download the payment QR code image.
+
+**No authentication required.**
+
+**Response `200`:** Binary image stream with appropriate `Content-Type`.
+
+**Response `404`:**
+```json
+{ "error": "No payment QR code found", "code": "QR_NOT_FOUND" }
 ```
 
 ---
 
-## 20. Infrastructure
-
-Public — no authentication required.
+## 21. Infrastructure
 
 ### `GET /health`
+
+Basic health check. Public — no authentication required.
 
 **Response `200`:**
 ```json
@@ -2781,6 +2985,8 @@ Public — no authentication required.
 ---
 
 ### `GET /health/deep`
+
+Deep health check including Redis connectivity. Public — no authentication required.
 
 **Response `200`:**
 ```json
@@ -2798,7 +3004,7 @@ Public — no authentication required.
 
 Prometheus-format metrics.
 
-**Authentication required. Admin or owner.**
+**Authentication required. Owner only.**
 
 **Response `200`** (`Content-Type: text/plain; version=0.0.4`):
 ```
@@ -2825,12 +3031,19 @@ gemini_requests_total{model="gemini-2.5-flash",status="success"} 4820
 
 ### `POST /v1/debug/test-key`
 
-Test a specific API key against Gemini. Admin/owner only.
+Test a specific API key against Gemini.
+
+**Authentication required. Owner only.**
 
 **Request:**
 ```json
 { "key": "AIzaSyABC...", "model": "gemini-2.5-flash" }
 ```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `key` | string | ✅ | Raw API key to test |
+| `model` | string | ❌ | Model to test against. Defaults to the configured default model. |
 
 **All outcomes return HTTP `200`** — check the `ok` boolean:
 ```json
@@ -2842,21 +3055,32 @@ Test a specific API key against Gemini. Admin/owner only.
 
 ### `POST /v1/debug/test-model`
 
-Test a model using the next available key from the pool. Admin/owner only.
+Test a model using the next available key from the pool.
+
+**Authentication required. Owner only.**
 
 **Request:**
 ```json
 { "model": "gemini-2.5-flash" }
 ```
 
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `model` | string | ✅ | Model to test |
+
 **Response `200`:**
 ```json
 { "ok": true, "status": 200, "latency_ms": 290, "model": "gemini-2.5-flash" }
 ```
 
+**Response `503`:**
+```json
+{ "ok": false, "error": "No keys available" }
+```
+
 ---
 
-## 20. Error Reference
+## 22. Error Reference
 
 ### Standard Error Shape
 
@@ -2873,7 +3097,7 @@ Test a model using the next available key from the pool. Admin/owner only.
 | Status | Meaning |
 |---|---|
 | `200` | Success |
-| `201` | Resource created (tickets) |
+| `201` | Resource created (tickets, tools, whitelist rules) |
 | `204` | Success, no content (delete operations) |
 | `400` | Bad request — check your request body/params |
 | `401` | Unauthorized — missing/expired/invalid token |
@@ -2884,7 +3108,7 @@ Test a model using the next available key from the pool. Admin/owner only.
 | `422` | Unprocessable — missing required server config (e.g. OWNER_EMAIL) |
 | `429` | Rate limit exceeded |
 | `502` | Upstream network error (Gemini unreachable) |
-| `503` | Service unavailable — maintenance mode, generation disabled, no keys, or DB/Redis down |
+| `503` | Service unavailable — maintenance mode, generation disabled, no keys, pool exhausted, or DB/Redis down |
 | `504` | Gateway timeout — Gemini took too long |
 
 ### Auth Error Codes
@@ -2907,6 +3131,7 @@ Test a model using the next available key from the pool. Admin/owner only.
 | `GENERATION_DISABLED` | AI generation paused by admin | Show notice, retry later |
 | `REGISTRATION_DISABLED` | New sign-ins paused by admin | Show notice on login page |
 | `NOT_WHITELISTED` | Email not in the allowed list | Show access denied message |
+| `DB_UNAVAILABLE` | Database connection error | Retry later |
 
 ### Tool Error Codes
 
@@ -2919,6 +3144,8 @@ Test a model using the next available key from the pool. Admin/owner only.
 | `DUPLICATE_NAME` | A tool with that name already exists |
 | `FILE_TOO_LARGE` | Uploaded file exceeds the 100 MB limit |
 | `FILE_NOT_FOUND` | ZIP-type tool's file has been deleted from the server disk |
+| `NO_EXTERNAL_URL` | External-type tool has no URL configured |
+| `QR_NOT_FOUND` | Payment QR code not uploaded |
 
 ### Generation Error Codes
 
@@ -2927,13 +3154,15 @@ Test a model using the next available key from the pool. Admin/owner only.
 | `RATE_LIMIT_EXCEEDED` | Per-minute limit hit. Check `reset_in_seconds`. |
 | `DAILY_LIMIT_EXCEEDED` | Daily plan quota hit. Check `limit` and `reset_in_seconds`. |
 | `NO_KEYS` | All API keys are in cooldown. Retry in ~60 seconds. |
+| `POOL_EXHAUSTED` | Key pool completely exhausted — circuit breaker tripped. |
 | `RETRIES_EXHAUSTED` | Tried 8 times across multiple keys/models, all failed. |
 | `UPSTREAM_ERROR` | Network-level failure reaching Google. |
 | `TIMEOUT` | Gemini took longer than 25 seconds to respond. |
+| `STREAM_ERROR` | Stream was interrupted mid-generation. |
 
 ---
 
-## 21. Full Flow Examples
+## 23. Full Flow Examples
 
 ### Complete Login Flow
 
@@ -3005,6 +3234,38 @@ async function sendMessage(userText) {
 
 ---
 
+### Using Embeddings
+
+```js
+// Single text embedding
+const res = await fetch('/v1/embeddings', {
+  method: 'POST',
+  headers: {
+    'Content-Type':  'application/json',
+    'Authorization': `Bearer ${token}`,
+  },
+  body: JSON.stringify({ text: 'What is machine learning?' }),
+});
+const { embedding } = await res.json();
+console.log(embedding.values); // [0.0123, -0.0456, ...]
+
+// Batch embeddings
+const batchRes = await fetch('/v1/embeddings', {
+  method: 'POST',
+  headers: {
+    'Content-Type':  'application/json',
+    'Authorization': `Bearer ${token}`,
+  },
+  body: JSON.stringify({
+    text: ['First text', 'Second text', 'Third text'],
+    model: 'text-embedding-004',
+  }),
+});
+const data = await batchRes.json();
+```
+
+---
+
 ### Admin: Enabling Maintenance Mode
 
 ```js
@@ -3021,7 +3282,8 @@ await api.patch('/v1/admin/system', {
 
 // 4. Check health after restart
 const health = await api.get('/v1/admin/health');
-console.log(health.data.mongo.status);   // "up"
+console.log(health.data.pulse);           // "healthy"
+console.log(health.data.mongo.status);    // "up"
 console.log(health.data.key_pool.active); // 8
 ```
 
@@ -3045,7 +3307,7 @@ await api.patch('/v1/admin/system/plan-limits', {
 
 ---
 
-## 22. Tester Use Cases & Verification
+## 24. Tester Use Cases & Verification
 
 This section provides specific scenarios for the QA team to verify system integrity and edge-case handling.
 
@@ -3054,7 +3316,7 @@ This section provides specific scenarios for the QA team to verify system integr
 - **Scenario:** Log in on Device A. Then log in on Device B with the same email.
 - **Expected:** Device A should receive an email about a new login, and its next API request should return `401 session_superseded`.
 
-### 2. AI Generation fallback
+### 2. AI Generation Fallback
 - **Use Case:** Verify model retry logic.
 - **Scenario:** Use a blocked/disabled API key or trigger a 503 from a specific model.
 - **Expected:** The server should automatically retry with a different key or fallback model. Response should contain `retries > 0`.
@@ -3067,7 +3329,7 @@ This section provides specific scenarios for the QA team to verify system integr
 ### 4. Admin System Control
 - **Use Case:** Verify Maintenance Mode.
 - **Scenario:** Enable `maintenance_mode` via `PATCH /v1/admin/system`.
-- **Expected:** Non-admin users should get `503 MAINTENANCE_MODE`. Admins should be able to continue using the API.
+- **Expected:** Non-admin users should get `503 MAINTENANCE_MODE`. Admins and owner should be able to continue using the API.
 
 ### 5. Support Ticket Attachments
 - **Use Case:** Verify screenshot upload and retrieval.
@@ -3078,3 +3340,52 @@ This section provides specific scenarios for the QA team to verify system integr
 - **Use Case:** Verify ZIP download tracking.
 - **Scenario:** Note the current `download_count` for a tool. Download it.
 - **Expected:** The `download_count` should increment by 1.
+
+### 7. Embeddings
+- **Use Case:** Verify text embedding generation.
+- **Scenario:** Send a single text and a batch of texts to `POST /v1/embeddings`.
+- **Expected:** Single text returns `embedding.values` array. Batch returns `embeddings` array.
+
+### 8. Circuit Breaker
+- **Use Case:** Verify pool exhaustion fast-fail.
+- **Scenario:** Disable all API keys, then send a generation request.
+- **Expected:** Should return `503 NO_KEYS` or `503 POOL_EXHAUSTED` without waiting for retries.
+
+### 9. Image Model Config
+- **Use Case:** Verify image model management.
+- **Scenario:** Use `GET /v1/models/config/image` to view, then `PUT /v1/models/config/image` to update.
+- **Expected:** Image model list should be persisted and retrievable.
+
+### 10. Payment System
+- **Use Case:** Verify public payment details.
+- **Scenario:** Call `GET /v1/system/payment-details` without authentication.
+- **Expected:** Should return UPI IDs and QR availability without requiring a JWT.
+
+---
+
+## Endpoint Summary
+
+| Section | Endpoints | Auth Level |
+|---|---|---|
+| Auth | 4 | Public |
+| Generate | 1 | User + Rate Limited |
+| Embeddings | 1 | User + Rate Limited |
+| Stream | 1 | User + Rate Limited |
+| Batch | 1 | User + Rate Limited |
+| Users | 12 | Mixed (User/Admin/Owner) |
+| Tickets | 8 | Mixed (User/Admin/Owner) |
+| Tools (user) | 3 | User |
+| Analytics & Logs | 9 | Mixed (User/Owner) |
+| Keys | 9 | Owner |
+| Models | 10 | Mixed (User/Owner) |
+| Queue | 8 | Owner |
+| Metrics | 1 | Owner |
+| Debug | 2 | Owner |
+| Admin System | 12 | Owner |
+| Admin Alerts | 7 | Owner |
+| Admin Health | 1 | Owner |
+| Admin Audit | 1 | Owner |
+| Admin Tools | 4 | Owner |
+| Payment (public) | 2 | Public |
+| Health | 2 | Public |
+| **Total** | **99** | |

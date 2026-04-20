@@ -253,6 +253,15 @@ function buildRequestBody(prompt, options = {}) {
     parts.push({ text: prompt });
   }
 
+  // File attachments (PDF as inline binary, Excel/CSV as extracted text)
+  for (const file of options.files ?? []) {
+    if (file.type === 'inlineData') {
+      parts.push({ inlineData: { mimeType: file.mimeType, data: file.data } });
+    } else if (file.type === 'text') {
+      parts.push({ text: file.text });
+    }
+  }
+
   for (const img of options.images ?? []) {
     if (img.type === 'url') {
       parts.push({ fileData: { mimeType: img.mimeType, fileUri: img.url } });
@@ -262,7 +271,7 @@ function buildRequestBody(prompt, options = {}) {
   }
 
   if (parts.length === 0) {
-    throw new Error('Request must contain at least one text or image part');
+    throw new Error('Request must contain at least one text, image, or file part');
   }
 
   // ── Assemble contents: prior history turns + current user turn ─────────────

@@ -1,8 +1,17 @@
 import { runGenerate, runEmbed } from '../services/orchestrator.js';
 import { checkUserRateLimit } from '../middleware/rateLimiter.js';
+import { parseFileToContent } from '../services/fileParsers.js';
 
 // Accepted image MIME types
 const IMAGE_MIME_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+
+// Accepted file MIME types (PDF + spreadsheets)
+const FILE_MIME_TYPES = [
+  'application/pdf',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
+  'application/vnd.ms-excel',                                          // .xls
+  'text/csv',                                                          // .csv
+];
 
 // Shared image schema used by both generate and stream routes
 const imagesSchema = {
@@ -17,6 +26,22 @@ const imagesSchema = {
       data:     { type: 'string', minLength: 1, description: 'Base64-encoded image bytes (required when type is base64)' },
       url:      { type: 'string', minLength: 8, description: 'HTTPS image URL (required when type is url)' },
     },
+  },
+};
+
+// Shared file schema used by both generate and stream routes
+const filesSchema = {
+  type: 'array',
+  maxItems: 5,
+  items: {
+    type: 'object',
+    required: ['mimeType', 'data'],
+    properties: {
+      mimeType: { type: 'string', enum: FILE_MIME_TYPES },
+      data:     { type: 'string', minLength: 1, description: 'Base64-encoded file bytes' },
+      name:     { type: 'string', maxLength: 255, description: 'Original filename (optional, for display)' },
+    },
+    additionalProperties: false,
   },
 };
 
@@ -35,7 +60,7 @@ const historySchema = {
   },
 };
 
-export { imagesSchema, historySchema };
+export { imagesSchema, historySchema, filesSchema };
 
 export async function generateRoutes(fastify) {
   fastify.post('/v1/generate', {
@@ -47,6 +72,7 @@ export async function generateRoutes(fastify) {
         properties: {
           prompt:            { type: 'string', minLength: 1 },
           images:            imagesSchema,
+          files:             filesSchema,
           model:             { type: 'string' },
           temperature:       { type: 'number', minimum: 0, maximum: 2 },
           maxOutputTokens:   { type: 'integer', minimum: 1 },
@@ -57,13 +83,13 @@ export async function generateRoutes(fastify) {
       },
     },
   }, async (request, reply) => {
-    const { prompt, images, model, temperature, maxOutputTokens,
+    const { prompt, images, files, model, temperature, maxOutputTokens,
             systemInstruction, history, thinkingBudget } = request.body;
 
     // Must have at least one content part
-    if (!prompt && (!images || images.length === 0)) {
+    if (!prompt && (!images || images.length === 0) && (!files || files.length === 0)) {
       reply.status(400);
-      return { error: 'Either prompt or images (or both) must be provided', code: 'BAD_REQUEST' };
+      return { error: 'Either prompt, images, or files (or a combination) must be provided', code: 'BAD_REQUEST' };
     }
 
     // Validate: base64 images must have data; url images must have url
@@ -85,10 +111,22 @@ export async function generateRoutes(fastify) {
       }
     }
 
+    // Parse files (PDF → inline binary part, Excel/CSV → extracted text)
+    let parsedFiles;
+    if (files?.length) {
+      try {
+        parsedFiles = files.map(f => parseFileToContent(f));
+      } catch (err) {
+        reply.status(400);
+        return { error: err.message, code: 'BAD_REQUEST' };
+      }
+    }
+
     const options = {};
     if (temperature        !== undefined) options.temperature        = temperature;
     if (maxOutputTokens    !== undefined) options.maxOutputTokens    = maxOutputTokens;
     if (images?.length)                   options.images             = images;
+    if (parsedFiles?.length)              options.files              = parsedFiles;
     if (systemInstruction)                options.systemInstruction  = systemInstruction;
     if (history?.length)                  options.history            = history;
     if (thinkingBudget     !== undefined) options.thinkingBudget     = thinkingBudget;
