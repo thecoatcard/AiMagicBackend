@@ -5,6 +5,7 @@ import {
   addFallbackModel,
   removeFallbackModel,
   getFallbackModels,
+  getImageModels,
 } from '../redis/modelConfig.js';
 import { requireOwner } from '../auth/roles.js';
 
@@ -127,5 +128,33 @@ export async function modelsRoutes(fastify) {
       return { error: 'Model not in fallback list', code: 'NOT_FOUND', model: name };
     }
     return { removed: true, model: name, ...(await getModelConfig()) };
+  });
+
+  // ── Image model config ────────────────────────────────────────────────────
+
+  // GET /v1/models/config/image — view image generation models
+  fastify.get('/v1/models/config/image', { preHandler: [requireOwner] }, async () => {
+    return { image_models: await getImageModels() };
+  });
+
+  // PUT /v1/models/config/image — replace entire image models list
+  fastify.put('/v1/models/config/image', {
+    preHandler: [requireOwner],
+    schema: {
+      body: {
+        type: 'object',
+        required: ['image_models'],
+        properties: {
+          image_models: { type: 'array', items: { type: 'string', minLength: 1 }, minItems: 1 },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    const { image_models } = request.body;
+    const redis = (await import('../redis/client.js')).getRedis();
+    await redis.hset('model:config', 'image_models', JSON.stringify(image_models));
+    const { savePersistentConfig } = await import('../db/config.js');
+    await savePersistentConfig('image_models', { image_models });
+    return { image_models };
   });
 }

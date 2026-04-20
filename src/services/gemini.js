@@ -196,6 +196,55 @@ export async function batchEmbedContents(key, model, texts) {
  *   { type: 'base64', mimeType: 'image/jpeg', data: '<base64-string>' }
  *   { type: 'url',    mimeType: 'image/jpeg', url:  'https://...'    }
  */
+/**
+ * Call Gemini generateContent with image output modality.
+ * Uses the standard generateContent endpoint with responseModalities: ["IMAGE", "TEXT"].
+ *
+ * @param {string} key     - API key
+ * @param {string} model   - e.g. "gemini-2.0-flash-exp"
+ * @param {string} prompt  - text prompt for image generation
+ * @param {object} options - { aspectRatio }
+ * @returns {{ status: number, data: object, latencyMs: number }}
+ */
+export async function generateImage(key, model, prompt, options = {}) {
+  const start = Date.now();
+  const body = JSON.stringify({
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    generationConfig: {
+      responseModalities: ['IMAGE', 'TEXT'],
+    },
+  });
+
+  let statusCode, resBody;
+  try {
+    ({ statusCode, body: resBody } = await pool.request({
+      method: 'POST',
+      path: `/v1beta/models/${model}:generateContent`,
+      headers: {
+        'content-type': 'application/json',
+        'x-goog-api-key': key,
+      },
+      body,
+      signal: AbortSignal.timeout(config.requestTimeoutMs),
+    }));
+  } catch (err) {
+    if (isTimeoutError(err)) {
+      const timeoutErr = new Error('Request timed out');
+      timeoutErr.code = 'TIMEOUT';
+      throw timeoutErr;
+    }
+    throw err;
+  }
+
+  try {
+    const rawData = await resBody.json();
+    return { status: statusCode, data: rawData, latencyMs: Date.now() - start };
+  } catch {
+    await resBody.dump().catch(() => {});
+    return { status: statusCode, data: {}, latencyMs: Date.now() - start };
+  }
+}
+
 function buildRequestBody(prompt, options = {}) {
   // ── Build the current user turn ────────────────────────────────────────────
   const parts = [];

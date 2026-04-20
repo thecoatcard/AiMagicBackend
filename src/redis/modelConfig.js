@@ -12,6 +12,11 @@ export const DEFAULT_FALLBACK_MODELS = [
   'gemini-2.5-flash-lite',
 ];
 
+// Default image generation models — models that support responseModalities: ["IMAGE", "TEXT"]
+export const DEFAULT_IMAGE_MODELS = [
+  'gemini-2.5-flash-image'
+];
+
 /**
  * Get the current fallback model list from Redis.
  * Falls back to DEFAULT_FALLBACK_MODELS if not configured.
@@ -21,6 +26,17 @@ export async function getFallbackModels() {
   const raw = await redis.hget(CONFIG_KEY, 'fallback_models');
   if (!raw) return [...DEFAULT_FALLBACK_MODELS];
   try { return JSON.parse(raw); } catch { return [...DEFAULT_FALLBACK_MODELS]; }
+}
+
+/**
+ * Get image generation models from Redis.
+ * Falls back to DEFAULT_IMAGE_MODELS if not configured.
+ */
+export async function getImageModels() {
+  const redis = getRedis();
+  const raw = await redis.hget(CONFIG_KEY, 'image_models');
+  if (!raw) return [...DEFAULT_IMAGE_MODELS];
+  try { return JSON.parse(raw); } catch { return [...DEFAULT_IMAGE_MODELS]; }
 }
 
 /**

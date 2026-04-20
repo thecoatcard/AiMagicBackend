@@ -1,9 +1,9 @@
 import { randomUUID } from 'crypto';
 import { config } from '../config.js';
-import { getKey, returnKey, cooldownKey, disableKey } from '../redis/keyPool.js';
-import { generateContent, embedContent, batchEmbedContents } from './gemini.js';
+import { getKey, returnKey, cooldownKey, disableKey, recordKeySuccess, recordKeyFailure } from '../redis/keyPool.js';
+import { generateContent, embedContent, batchEmbedContents, generateImage } from './gemini.js';
 import { recordSuccess, recordFailure, getBestModel } from '../redis/modelHealth.js';
-import { getFallbackModels } from '../redis/modelConfig.js';
+import { getFallbackModels, getImageModels } from '../redis/modelConfig.js';
 import { logRequest, logError } from '../db/logger.js';
 import { notifyAdminNoKeys } from './notifications.js';
 import { recordFailureRateTick } from '../redis/systemConfig.js';
@@ -100,6 +100,7 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
     if (result.status === 200) {
       await returnKey(key);
       await recordSuccess(currentModel, result.latencyMs);
+      recordKeySuccess(lastKeyMasked).catch(() => {});
       model429Count = 0; // Success -> reset counter
       logRequest({ request_id: reqId, model: currentModel, api_key_masked: lastKeyMasked, latency_ms: result.latencyMs, status: 'success', retries, prompt_length: prompt?.length ?? 0, usage_metadata: result.data?.usageMetadata, user_email: userEmail });
       requestsTotal.inc({ model: currentModel, status: 'success' });
@@ -117,6 +118,7 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
 
     if (result.status === 429) {
       model429Count++;
+      recordKeyFailure(lastKeyMasked).catch(() => {});
       if (model429Count < 3) {
         await cooldownKey(key, config.cooldownMs);
         logError({ type: '429', model: currentModel, key_masked: lastKeyMasked, message: `Rate limit hit ${model429Count}/3` });
@@ -133,6 +135,7 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
     // Handle 5xx and explicit 4xx switches (400, 404)
     if ([500, 502, 503, 504, 400, 404].includes(result.status) || (result.status === 429 && model429Count >= 3)) {
       if (result.status !== 429) await returnKey(key);
+      recordKeyFailure(lastKeyMasked).catch(() => {});
       
       const type = String(result.status);
       await recordFailure(currentModel, result.status >= 500 ? '503' : 'other');
@@ -160,6 +163,7 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
 
     if (result.status === 401 || result.status === 403) {
       await disableKey(key);
+      recordKeyFailure(lastKeyMasked).catch(() => {});
       logError({ type: 'key_invalid', model: currentModel, key_masked: lastKeyMasked, message: `Status ${result.status}: API Key is invalid or revoked` });
       recordFailureRateTick().catch(() => {});
       lastError = 'key_invalid';
@@ -279,6 +283,118 @@ export async function runEmbed({ text, model, requestId, userEmail } = {}) {
   }
 
   logRequest({ request_id: reqId, model: currentModel, api_key_masked: lastKeyMasked, latency_ms: 0, status: 'exhausted', retries, user_email: userEmail });
+  return { error: 'All retries exhausted', lastError, code: 'RETRIES_EXHAUSTED', request_id: reqId, httpStatus: 503 };
+}
+
+/**
+ * Image generation with full key rotation, model fallback, and retry.
+ * Uses dedicated image models that support responseModalities: ["IMAGE", "TEXT"].
+ */
+export async function runImageGeneration({ prompt, options = {}, requestId, userEmail } = {}) {
+  const reqId = requestId ?? randomUUID();
+  const wallStart = Date.now();
+
+  const imageModels = await getImageModels();
+  if (!imageModels || imageModels.length === 0) {
+    return { error: 'No image generation models configured', code: 'NO_IMAGE_MODELS', request_id: reqId, httpStatus: 503 };
+  }
+  let currentModel = imageModels[0];
+  let modelIndex = 0;
+
+  let lastKeyMasked = null;
+  let retries = 0;
+  let lastError = null;
+  let model429Count = 0;
+
+  for (let attempt = 0; attempt < config.maxRetries; attempt++) {
+    if (attempt > 0) retries++;
+
+    const key = await getKey();
+    if (!key) {
+      notifyAdminNoKeys();
+      return { error: 'No API keys available', code: 'NO_KEYS', request_id: reqId, httpStatus: 503 };
+    }
+    lastKeyMasked = maskKey(key);
+
+    let result;
+    try {
+      result = await generateImage(key, currentModel, prompt, options);
+    } catch (err) {
+      await returnKey(key);
+      if (err.code === 'TIMEOUT') {
+        await recordFailure(currentModel, 'timeout');
+        logError({ type: 'timeout', model: currentModel, key_masked: lastKeyMasked, message: err.message, user_email: userEmail });
+        lastError = 'timeout';
+        // Advance to next image model
+        modelIndex++;
+        currentModel = imageModels[modelIndex] ?? null;
+        model429Count = 0;
+        if (!currentModel) break;
+        continue;
+      }
+      return { error: err.message, code: 'UPSTREAM_ERROR', request_id: reqId, httpStatus: 502 };
+    }
+
+    if (result.status === 200) {
+      await returnKey(key);
+      await recordSuccess(currentModel, result.latencyMs);
+      recordKeySuccess(lastKeyMasked).catch(() => {});
+
+      // Extract images from Gemini generateContent response
+      const parts = result.data?.candidates?.[0]?.content?.parts ?? [];
+      const images = [];
+      let textResponse = '';
+      for (const part of parts) {
+        if (part.inlineData?.data) {
+          images.push(part.inlineData.data);
+        }
+        if (part.text) {
+          textResponse += part.text;
+        }
+      }
+
+      return { images, text: textResponse, model: currentModel, request_id: reqId, latency_ms: result.latencyMs };
+    }
+
+    if (result.status === 429) {
+      model429Count++;
+      recordKeyFailure(lastKeyMasked).catch(() => {});
+      await cooldownKey(key, config.cooldownMs);
+      if (model429Count < 3) {
+        lastError = '429';
+        continue; // same model, rotate key
+      }
+      // 3 strikes — fall through to model switch
+      logError({ type: '429_EXHAUSTED', model: currentModel, key_masked: lastKeyMasked });
+    }
+
+    if ([500, 502, 503, 504, 400, 404].includes(result.status) || (result.status === 429 && model429Count >= 3)) {
+      if (result.status !== 429) await returnKey(key);
+      recordKeyFailure(lastKeyMasked).catch(() => {});
+      await recordFailure(currentModel, result.status >= 500 ? '503' : 'other');
+      logError({ type: String(result.status), model: currentModel, key_masked: lastKeyMasked });
+      lastError = String(result.status);
+
+      modelIndex++;
+      currentModel = imageModels[modelIndex] ?? null;
+      if (!currentModel) break;
+      model429Count = 0;
+      continue;
+    }
+
+    if (result.status === 401 || result.status === 403) {
+      recordKeyFailure(lastKeyMasked).catch(() => {});
+      await disableKey(key);
+      lastError = 'key_invalid';
+      continue; // try next key, same model
+    }
+
+    await returnKey(key);
+    recordKeyFailure(lastKeyMasked).catch(() => {});
+    const errMsg = result.data?.error?.message || 'Image generation failed';
+    return { error: errMsg, code: String(result.status), request_id: reqId, httpStatus: result.status };
+  }
+
   return { error: 'All retries exhausted', lastError, code: 'RETRIES_EXHAUSTED', request_id: reqId, httpStatus: 503 };
 }
 

@@ -7,6 +7,7 @@ const KEY_POOL_LOW_THRESHOLD = parseInt(process.env.KEY_POOL_LOW_THRESHOLD || '5
 
 const ACTIVE_LIST = 'gemini_keys';
 const COOLDOWN_ZSET = 'gemini_keys_cooldown';
+const KEY_STATS_HASH = 'gemini_key_stats'; // Hash: maskedKey -> JSON { calls, success, fail }
 // Score used to permanently disable a key (year 9999)
 const DISABLED_SCORE = 253402300799000;
 
@@ -160,25 +161,38 @@ export async function listKeys() {
   const redis = getRedis();
   const now = Date.now();
 
-  const [activeKeys, cooldownEntries] = await Promise.all([
+  const [activeKeys, cooldownEntries, statsRaw] = await Promise.all([
     redis.lrange(ACTIVE_LIST, 0, -1),
     redis.zrangebyscore(COOLDOWN_ZSET, '-inf', '+inf', 'WITHSCORES'),
+    redis.hgetall(KEY_STATS_HASH),
   ]);
 
-  const active = activeKeys.map(k => ({
-    key: maskKey(k),
-    status: 'active',
-  }));
+  const stats = {};
+  for (const [k, v] of Object.entries(statsRaw)) {
+    try { stats[k] = JSON.parse(v); } catch { stats[k] = { calls: 0, success: 0, fail: 0 }; }
+  }
+  const defaultStats = { calls: 0, success: 0, fail: 0 };
+
+  const active = activeKeys.map(k => {
+    const masked = maskKey(k);
+    return {
+      key: masked,
+      status: 'active',
+      stats: stats[masked] ?? defaultStats,
+    };
+  });
 
   const cooldown = [];
   for (let i = 0; i < cooldownEntries.length; i += 2) {
     const k = cooldownEntries[i];
     const score = parseInt(cooldownEntries[i + 1], 10);
     const permanent = score === DISABLED_SCORE;
+    const masked = maskKey(k);
     cooldown.push({
-      key: maskKey(k),
+      key: masked,
       status: permanent ? 'disabled' : 'cooldown',
       cooldownRemainingMs: permanent ? null : Math.max(0, score - now),
+      stats: stats[masked] ?? defaultStats,
     });
   }
 
@@ -282,6 +296,46 @@ export async function syncApiKeysWithDb(client) {
 function maskKey(key) {
   if (key.length <= 8) return '****';
   return key.slice(0, 4) + '****' + key.slice(-4);
+}
+
+/**
+ * Record a successful API call for a key (by masked key).
+ * @param {string} maskedKey
+ */
+export async function recordKeySuccess(maskedKey) {
+  const redis = getRedis();
+  const raw = await redis.hget(KEY_STATS_HASH, maskedKey);
+  const stats = raw ? JSON.parse(raw) : { calls: 0, success: 0, fail: 0 };
+  stats.calls++;
+  stats.success++;
+  await redis.hset(KEY_STATS_HASH, maskedKey, JSON.stringify(stats));
+}
+
+/**
+ * Record a failed API call for a key (by masked key).
+ * @param {string} maskedKey
+ */
+export async function recordKeyFailure(maskedKey) {
+  const redis = getRedis();
+  const raw = await redis.hget(KEY_STATS_HASH, maskedKey);
+  const stats = raw ? JSON.parse(raw) : { calls: 0, success: 0, fail: 0 };
+  stats.calls++;
+  stats.fail++;
+  await redis.hset(KEY_STATS_HASH, maskedKey, JSON.stringify(stats));
+}
+
+/**
+ * Get all per-key stats.
+ * @returns {Promise<Record<string, { calls: number, success: number, fail: number }>>}
+ */
+export async function getAllKeyStats() {
+  const redis = getRedis();
+  const raw = await redis.hgetall(KEY_STATS_HASH);
+  const result = {};
+  for (const [k, v] of Object.entries(raw)) {
+    try { result[k] = JSON.parse(v); } catch { result[k] = { calls: 0, success: 0, fail: 0 }; }
+  }
+  return result;
 }
 
 /**

@@ -129,4 +129,5 @@ export async function generateRoutes(fastify) {
     const { httpStatus: _, ...response } = result;
     return response;
   });
+
 }

@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import { config } from '../config.js';
-import { getKey, returnKey, cooldownKey, disableKey } from '../redis/keyPool.js';
+import { getKey, returnKey, cooldownKey, disableKey, recordKeySuccess, recordKeyFailure } from '../redis/keyPool.js';
 import { recordSuccess, recordFailure, getBestModel } from '../redis/modelHealth.js';
 import { getFallbackModels } from '../redis/modelConfig.js';
 import { streamGenerateContent } from '../services/gemini.js';
@@ -138,6 +138,7 @@ export async function streamRoutes(fastify) {
       if (result.status === 429) {
         result.bodyStream.destroy();
         model429Count++;
+        recordKeyFailure(lastKeyMasked).catch(() => {});
         if (model429Count < 3) {
           logError({ type: '429', model: currentModel, key_masked: lastKeyMasked, message: `Rate limit hit ${model429Count}/3` });
           keyCooldownsTotal.inc();
@@ -154,6 +155,7 @@ export async function streamRoutes(fastify) {
           result.bodyStream?.destroy();
           await returnKey(key);
         }
+        recordKeyFailure(lastKeyMasked).catch(() => {});
         
         const type = String(result.status);
         await recordFailure(currentModel, result.status >= 500 ? '503' : 'other');
@@ -174,6 +176,7 @@ export async function streamRoutes(fastify) {
       if (result.status === 401 || result.status === 403) {
         result.bodyStream.destroy();
         await disableKey(key);
+        recordKeyFailure(lastKeyMasked).catch(() => {});
         logError({ type: 'key_invalid', model: currentModel, key_masked: lastKeyMasked, message: `Status ${result.status}: API Key is invalid` });
         continue; // try next key
       }
@@ -192,6 +195,7 @@ export async function streamRoutes(fastify) {
       // ── Success — stream back to client ────────────────────────────────────
       await returnKey(key);
       await recordSuccess(currentModel, Date.now() - wallStart);
+      recordKeySuccess(lastKeyMasked).catch(() => {});
       model429Count = 0; // Success -> reset counter
       requestsTotal.inc({ model: currentModel, status: 'success' });
       requestDuration.observe({ model: currentModel }, Date.now() - wallStart);

@@ -17,6 +17,7 @@ import { loadModelConfigFromDb } from './redis/modelConfig.js';
 import { syncApiKeysWithDb, seedKeysFromEnv, restoreExpiredKeys, getPoolStats } from './redis/keyPool.js';
 import { invalidateUserLimitsCache } from './middleware/rateLimiter.js';
 import { writeAuditLog } from './db/auditLog.js';
+import { runDailyRotation, hydrateFromMongoIfNeeded } from './services/dailySnapshot.js';
 
 const server = buildServer();
 
@@ -84,7 +85,16 @@ async function bootstrap() {
   // 5. Start BullMQ worker
   startWorker(config.workerConcurrency);
   server.log.info(`[Worker] Started with concurrency ${config.workerConcurrency}`);
-}
+
+  // 6. Hydrate Redis with today's snapshot if data is missing (e.g. after nightly clear or restart)
+  try {
+    const hydration = await hydrateFromMongoIfNeeded();
+    if (hydration.hydrated) {
+      server.log.info(`[Bootstrap] Hydrated Redis from ${hydration.date} snapshot`);
+    }
+  } catch (err) {
+    server.log.warn({ err }, '[Bootstrap] Failed to hydrate from snapshot');
+  }}
 
 await bootstrap();
 
@@ -211,6 +221,9 @@ setInterval(async () => {
 // Daily summary — fires once per day at 08:00 UTC
 scheduleDailySummary();
 
+// Daily Redis rotation — fires at 11:00 PM IST (17:30 UTC)
+scheduleDailyRotation();
+
 // Premium Expiry Cleanup — runs once on startup and then every hour
 async function cleanupExpiredSubscriptions() {
   try {
@@ -237,6 +250,35 @@ cleanupExpiredSubscriptions();
 // Then run every hour
 setInterval(cleanupExpiredSubscriptions, 60 * 60 * 1000);
 
+// Log Cleanup — delete requests, errors, and snapshots older than 15 days
+async function cleanupOldLogs() {
+  try {
+    const db = await getDb();
+    const cutoff = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000);
+
+    const [reqResult, errResult, snapResult] = await Promise.all([
+      db.collection('requests').deleteMany({ created_at: { $lt: cutoff } }),
+      db.collection('errors').deleteMany({ timestamp: { $lt: cutoff } }),
+      db.collection('daily_snapshots').deleteMany({ snapshot_at: { $lt: cutoff } }),
+    ]);
+
+    const total = (reqResult.deletedCount || 0) + (errResult.deletedCount || 0) + (snapResult.deletedCount || 0);
+    if (total > 0) {
+      server.log.info({
+        requests: reqResult.deletedCount,
+        errors: errResult.deletedCount,
+        snapshots: snapResult.deletedCount,
+      }, `[LogCleanup] Deleted ${total} documents older than 15 days`);
+    }
+  } catch (err) {
+    server.log.error({ err }, '[LogCleanup] Failed to clean old logs');
+  }
+}
+
+// Run on startup then every 24 hours
+cleanupOldLogs();
+setInterval(cleanupOldLogs, 24 * 60 * 60 * 1000);
+
 try {
   await server.listen({ port: config.port, host: '0.0.0.0' });
 } catch (err) {
@@ -254,6 +296,31 @@ function scheduleDailySummary() {
 
   setTimeout(async function tick() {
     await sendDailySummary();
+    // Schedule the next one in exactly 24h
+    setTimeout(tick, 24 * 60 * 60 * 1000);
+  }, msUntilFirst);
+}
+
+// 11 PM IST = 17:30 UTC (IST is UTC+5:30)
+function scheduleDailyRotation() {
+  const now = new Date();
+  const next1130pm = new Date(Date.UTC(
+    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 17, 30, 0, 0,
+  ));
+  if (now >= next1130pm) next1130pm.setUTCDate(next1130pm.getUTCDate() + 1);
+  const msUntilFirst = next1130pm - now;
+
+  const hoursUntil = (msUntilFirst / 3600000).toFixed(1);
+  server.log.info(`[DailyRotation] Next run in ${hoursUntil}h (11:00 PM IST)`);
+
+  setTimeout(async function tick() {
+    try {
+      server.log.info('[DailyRotation] Starting nightly snapshot & cleanup...');
+      const result = await runDailyRotation();
+      server.log.info({ result }, '[DailyRotation] Completed successfully');
+    } catch (err) {
+      server.log.error({ err }, '[DailyRotation] Failed');
+    }
     // Schedule the next one in exactly 24h
     setTimeout(tick, 24 * 60 * 60 * 1000);
   }, msUntilFirst);
