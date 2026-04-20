@@ -24,6 +24,9 @@ export const config = {
 
   // Auth
   jwtSecret: process.env.JWT_SECRET || (() => {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('[config] FATAL: JWT_SECRET must be set in production. Refusing to start with insecure default.');
+    }
     if (process.env.NODE_ENV !== 'test') {
       console.warn('[config] WARNING: JWT_SECRET is not set — using insecure default. Set JWT_SECRET in .env before going to production.');
     }

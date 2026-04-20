@@ -4,6 +4,7 @@ import { config } from '../config.js';
 // Promise-based singleton — safe for concurrent startup calls
 let _connectingPromise = null;
 let _db = null;
+let _client = null;
 
 export async function getDb() {
   if (_db) return _db;
@@ -24,6 +25,7 @@ export async function getDb() {
         { key: { api_key_masked: 1, created_at: -1 } },
         { key: { model: 1, created_at: -1 } },
         { key: { status: 1 } },
+        { key: { user_email: 1, created_at: -1 } },
       ]);
 
       await db.collection('errors').createIndexes([
@@ -33,6 +35,7 @@ export async function getDb() {
       ]);
 
       console.info('[MongoDB] connected to', config.mongodbName);
+      _client = client;
       _db = db;
       return db;
     })().catch((err) => {
@@ -42,4 +45,16 @@ export async function getDb() {
   }
 
   return _connectingPromise;
+}
+
+/**
+ * Close the MongoDB connection gracefully.
+ */
+export async function closeDb() {
+  if (_client) {
+    await _client.close();
+    _client = null;
+    _db = null;
+    _connectingPromise = null;
+  }
 }

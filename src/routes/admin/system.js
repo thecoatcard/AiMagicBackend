@@ -40,6 +40,10 @@ export async function adminSystemRoutes(fastify) {
       gen_max_tokens:          cfg.gen_max_tokens  ? parseInt(cfg.gen_max_tokens, 10) : null,
       max_sessions_user:       parseInt(cfg.max_sessions_user,  10) || 1,
       max_sessions_admin:      parseInt(cfg.max_sessions_admin, 10) || 3,
+      payment_upi_1:           cfg.payment_upi_1 || '',
+      payment_upi_2:           cfg.payment_upi_2 || '',
+      payment_qr_path:         cfg.payment_qr_path || '',
+      payment_qr_file_id:      cfg.payment_qr_file_id || '',
     };
   });
 
@@ -57,8 +61,8 @@ export async function adminSystemRoutes(fastify) {
           alert_failure_threshold: { type: 'integer', minimum: 1 },
           alert_queue_threshold:   { type: 'integer', minimum: 1 },
           alert_pool_low_threshold:{ type: 'integer', minimum: 1 },
-          gen_temperature:         { type: 'number',  minimum: 0, maximum: 2 },
-          gen_max_tokens:          { type: 'integer', minimum: 1 },
+          gen_temperature:         { oneOf: [{ type: 'number', minimum: 0, maximum: 2 }, { type: 'null' }] },
+          gen_max_tokens:          { oneOf: [{ type: 'integer', minimum: 1 }, { type: 'null' }] },
           max_sessions_user:       { type: 'integer', minimum: 1 },
           max_sessions_admin:      { type: 'integer', minimum: 1 },
         },
@@ -68,7 +72,11 @@ export async function adminSystemRoutes(fastify) {
   }, async (request) => {
     const updates = {};
     for (const [k, v] of Object.entries(request.body)) {
-      updates[k] = typeof v === 'boolean' ? (v ? '1' : '0') : String(v);
+      if (v === null) {
+        updates[k] = '';
+      } else {
+        updates[k] = typeof v === 'boolean' ? (v ? '1' : '0') : String(v);
+      }
     }
     await setSystemConfig(updates);
 

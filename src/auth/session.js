@@ -10,6 +10,20 @@ function sessionKey(email) {
   return `${SESSION_PREFIX}${email}`;
 }
 
+// Lua script: atomically ZADD + EXPIRE + ZREMRANGEBYRANK to prevent
+// race conditions where concurrent logins exceed the session limit.
+const CREATE_SESSION_LUA = `
+  local key = KEYS[1]
+  local score = tonumber(ARGV[1])
+  local sessionId = ARGV[2]
+  local ttl = tonumber(ARGV[3])
+  local limit = tonumber(ARGV[4])
+  redis.call('ZADD', key, score, sessionId)
+  redis.call('EXPIRE', key, ttl)
+  local removed = redis.call('ZREMRANGEBYRANK', key, 0, -(limit + 1))
+  return removed
+`;
+
 /**
  * Create a new session for the user.
  * - Generates a unique sessionId
@@ -33,16 +47,10 @@ export async function createSession(email, role = 'user', plan = 'free') {
     ? await getMaxSessionsAdmin() 
     : await getMaxSessionsUser();
 
-  // Add new session to the set
-  await redis.zadd(key, now, sessionId);
-
-  // Set/Refresh TTL for the entire set (matching JWT expiry)
   const ttlSeconds = parseDurationToSeconds(config.jwtExpiresIn);
-  await redis.expire(key, ttlSeconds);
 
-  // Remove oldest sessions if we exceed the limit
-  // ZREMRANGEBYRANK 0 -(limit+1) removes the oldest ones, keeping only the 'limit' highest scores (newest)
-  const removedCount = await redis.zremrangebyrank(key, 0, -(limit + 1));
+  // Atomic: ZADD + EXPIRE + ZREMRANGEBYRANK in a single Lua call
+  const removedCount = await redis.eval(CREATE_SESSION_LUA, 1, key, now, sessionId, ttlSeconds, limit);
 
   const token = jwt.sign(
     { email, sessionId, role, plan },

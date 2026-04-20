@@ -108,14 +108,14 @@ export async function clearVolatileRedisData() {
       const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 200);
       cursor = nextCursor;
       if (keys.length > 0) {
-        await redis.del(...keys);
+        await redis.unlink(...keys);
         totalDeleted += keys.length;
       }
     } while (cursor !== '0');
   }
 
   // Delete single keys
-  await redis.del('gemini_key_stats');
+  await redis.unlink('gemini_key_stats');
   totalDeleted++;
 
   console.info(`[DailySnapshot] Cleared ${totalDeleted} volatile Redis keys`);

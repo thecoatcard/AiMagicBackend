@@ -6,6 +6,26 @@ import { getDefaultPerMin, getPlanDailyLimit } from '../redis/systemConfig.js';
 
 const LIMITS_CACHE_TTL_S  = 300; // 5-minute cache for user rate-limit data
 
+// Lua script: atomically check limit BEFORE incrementing.
+// Returns [newCount, ttl]. If limit would be exceeded, returns [-1, ttl] without incrementing.
+const RATE_LIMIT_LUA = `
+  local key = KEYS[1]
+  local limit = tonumber(ARGV[1])
+  local ttl_s = tonumber(ARGV[2])
+  local incr = tonumber(ARGV[3])
+  local current = tonumber(redis.call('GET', key) or '0')
+  if current + incr > limit then
+    local t = redis.call('TTL', key)
+    return {-1, t > 0 and t or ttl_s}
+  end
+  local newVal = redis.call('INCRBY', key, incr)
+  if newVal == incr then
+    redis.call('EXPIRE', key, ttl_s)
+  end
+  local t = redis.call('TTL', key)
+  return {newVal, t > 0 and t or ttl_s}
+`;
+
 /**
  * Fastify preHandler — enforces per-user rate limits (requests/min + requests/day).
  * Admins and owners bypass rate limiting entirely.
@@ -29,40 +49,34 @@ export async function checkUserRateLimit(request, reply) {
   const minKey = `rate:${email}:min`;
   const dayKey = `rate:${email}:day`;
 
-  // Check per-minute limit first to avoid inflating daily counter on rejected requests
-  const minCount = await redis.incr(minKey);
-  if (minCount === 1) await redis.expire(minKey, 60);
+  // Atomic check-then-increment for per-minute limit
+  const [minCount, minTtl] = await redis.eval(RATE_LIMIT_LUA, 1, minKey, maxPerMin, 60, 1);
 
-  if (minCount > maxPerMin) {
-    const ttl = await redis.ttl(minKey);
+  if (minCount === -1) {
     reply.status(429).send({
       error:            `Rate limit exceeded: max ${maxPerMin} requests per minute`,
       code:             'RATE_LIMIT_EXCEEDED',
-      reset_in_seconds: ttl,
+      reset_in_seconds: minTtl,
     });
     return;
   }
 
-  // Per-minute OK — now increment and check daily counter
-  const dayCount = await redis.incr(dayKey);
-  if (dayCount === 1) await redis.expire(dayKey, 86400);
+  // Atomic check-then-increment for daily limit
+  const [dayCount, dayTtl] = await redis.eval(RATE_LIMIT_LUA, 1, dayKey, maxPerDay, 86400, 1);
 
-  if (dayCount > maxPerDay) {
-    const ttl = await redis.ttl(dayKey);
-    // Fire quota-exhausted warning (100%) — throttled inside notifyQuotaWarning
-    notifyQuotaWarning(email, { used: dayCount, limit: maxPerDay, resetInSeconds: ttl });
+  if (dayCount === -1) {
+    notifyQuotaWarning(email, { used: maxPerDay, limit: maxPerDay, resetInSeconds: dayTtl });
     reply.status(429).send({
       error:            `Daily quota exceeded: max ${maxPerDay} requests per day (${cached.plan ?? 'free'} plan)`,
       code:             'DAILY_LIMIT_EXCEEDED',
       limit:            maxPerDay,
-      reset_in_seconds: ttl,
+      reset_in_seconds: dayTtl,
     });
     return;
   }
 
   // Fire 80% quota warning (non-blocking; notifyQuotaWarning self-throttles)
-  const ttlDay = await redis.ttl(dayKey);
-  notifyQuotaWarning(email, { used: dayCount, limit: maxPerDay, resetInSeconds: ttlDay });
+  notifyQuotaWarning(email, { used: dayCount, limit: maxPerDay, resetInSeconds: dayTtl });
 
   incrementUserUsage(email);
 }
@@ -88,38 +102,33 @@ export async function checkBatchRateLimit(request, reply) {
   const minKey = `rate:${email}:min`;
   const dayKey = `rate:${email}:day`;
 
-  // Check per-minute limit first to avoid inflating daily counter on rejected requests
-  const minCount = await redis.incrby(minKey, count);
-  if (minCount === count) await redis.expire(minKey, 60);
+  // Atomic check-then-increment for per-minute limit
+  const [minCount, minTtl] = await redis.eval(RATE_LIMIT_LUA, 1, minKey, maxPerMin, 60, count);
 
-  if (minCount > maxPerMin) {
-    const ttl = await redis.ttl(minKey);
+  if (minCount === -1) {
     reply.status(429).send({
       error:            `Rate limit exceeded: max ${maxPerMin} requests per minute`,
       code:             'RATE_LIMIT_EXCEEDED',
-      reset_in_seconds: ttl,
+      reset_in_seconds: minTtl,
     });
     return;
   }
 
-  // Per-minute OK — now increment and check daily counter
-  const dayCount = await redis.incrby(dayKey, count);
-  if (dayCount === count) await redis.expire(dayKey, 86400);
+  // Atomic check-then-increment for daily limit
+  const [dayCount, dayTtl] = await redis.eval(RATE_LIMIT_LUA, 1, dayKey, maxPerDay, 86400, count);
 
-  if (dayCount > maxPerDay) {
-    const ttl = await redis.ttl(dayKey);
-    notifyQuotaWarning(email, { used: dayCount, limit: maxPerDay, resetInSeconds: ttl });
+  if (dayCount === -1) {
+    notifyQuotaWarning(email, { used: maxPerDay, limit: maxPerDay, resetInSeconds: dayTtl });
     reply.status(429).send({
       error:            `Daily quota exceeded: max ${maxPerDay} requests per day (${cached.plan ?? 'free'} plan)`,
       code:             'DAILY_LIMIT_EXCEEDED',
       limit:            maxPerDay,
-      reset_in_seconds: ttl,
+      reset_in_seconds: dayTtl,
     });
     return;
   }
 
-  const ttlDay = await redis.ttl(dayKey);
-  notifyQuotaWarning(email, { used: dayCount, limit: maxPerDay, resetInSeconds: ttlDay });
+  notifyQuotaWarning(email, { used: dayCount, limit: maxPerDay, resetInSeconds: dayTtl });
 
   incrementUserUsage(email, count);
 }

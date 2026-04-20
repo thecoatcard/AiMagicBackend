@@ -13,7 +13,9 @@ import { getSystemConfig } from '../redis/systemConfig.js';
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 function fire(promise) {
-  Promise.resolve(promise).catch(() => {}); // swallow all errors
+  Promise.resolve(promise).catch(err => {
+    console.warn('[notifications] Failed to send notification:', err.message);
+  });
 }
 
 function send(to, template, data = {}) {

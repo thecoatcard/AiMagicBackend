@@ -20,17 +20,22 @@ export async function analyticsRoutes(fastify) {
           skip:   { type: 'integer', minimum: 0, default: 0 },
           model:  { type: 'string' },
           status: { type: 'string', enum: ['success', 'error', 'exhausted'] },
+          user_email: { type: 'string', format: 'email' },
         },
       },
     },
   }, async (request, reply) => {
-    const { limit, skip, model, status } = request.query;
+    const { limit, skip, model, status, user_email } = request.query;
     const filter = {};
     if (model)  filter.model  = model;
     if (status) filter.status = status;
-    // Non-owners can only see their own requests (Admins are now restricted from global logs)
-    const isPrivileged = request.user.role === 'owner';
-    if (!isPrivileged) filter.user_email = request.user.email;
+    // Privileged users (admin/owner) can filter by user_email; others see only their own
+    const isPrivileged = request.user.role === 'owner' || request.user.role === 'admin';
+    if (isPrivileged && user_email) {
+      filter.user_email = user_email;
+    } else if (!isPrivileged || !user_email) {
+      if (!isPrivileged) filter.user_email = request.user.email;
+    }
 
     let db;
     try { db = await getDb(); } catch {
@@ -95,7 +100,8 @@ export async function analyticsRoutes(fastify) {
     }
 
     const isOwner = request.user.role === 'owner';
-    const matchStage = isOwner ? {} : { user_email: request.user.email };
+    const isAdmin = request.user.role === 'admin';
+    const matchStage = (isOwner || isAdmin) ? {} : { user_email: request.user.email };
     const matchFilter = Object.keys(matchStage).length > 0 ? [{ $match: matchStage }] : [];
 
     const [overall, byModel, byStatus] = await Promise.all([

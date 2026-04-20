@@ -10,6 +10,7 @@ import { notifyAdminNoKeys } from '../services/notifications.js';
 import { imagesSchema, historySchema, filesSchema } from './generate.js';
 import { parseFileToContent } from '../services/fileParsers.js';
 import { maskKey } from '../services/orchestrator.js';
+import { recordFailureRateTick } from '../redis/systemConfig.js';
 import {
   requestsTotal,
   requestDuration,
@@ -124,6 +125,7 @@ export async function streamRoutes(fastify) {
           await recordFailure(currentModel, 'timeout');
           logError({ type: 'timeout', model: currentModel, key_masked: lastKeyMasked, message: err.message, user_email: userEmail });
           modelTimeoutsTotal.inc({ model: currentModel });
+          recordFailureRateTick().catch(() => {});
 
           // Fall back to next lighter model — same logic as orchestrator.js
           if (fallbackIndex === -1) {
@@ -152,6 +154,7 @@ export async function streamRoutes(fastify) {
         if (model429Count < 3) {
           logError({ type: '429', model: currentModel, key_masked: lastKeyMasked, message: `Rate limit hit ${model429Count}/3` });
           keyCooldownsTotal.inc();
+          recordFailureRateTick().catch(() => {});
           await cooldownKey(key, config.cooldownMs * 2, '429_rate_limit');
           continue; // same model, rotate key
         }
@@ -171,6 +174,7 @@ export async function streamRoutes(fastify) {
         await recordFailure(currentModel, result.status >= 500 ? '503' : 'other');
         logError({ type, model: currentModel, key_masked: lastKeyMasked });
         if (result.status === 503) model503Total.inc({ model: currentModel });
+        recordFailureRateTick().catch(() => {});
         
         const remaining = fallbackIndex === -1
           ? fallbackModels
@@ -188,6 +192,7 @@ export async function streamRoutes(fastify) {
         await disableKey(key, 'key_invalid');
         recordKeyFailure(lastKeyMasked).catch(() => {});
         logError({ type: 'key_invalid', model: currentModel, key_masked: lastKeyMasked, message: `Status ${result.status}: API Key is invalid` });
+        recordFailureRateTick().catch(() => {});
         continue; // try next key
       }
 

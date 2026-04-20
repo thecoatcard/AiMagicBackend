@@ -4,7 +4,7 @@ import { config } from '../config.js';
 
 let _client;
 let _currentIndex = 0;
-let _failoverInProgress = false;
+let _failoverPromise = null;      // Promise-based mutex: only one failover at a time
 let _lastFailoverTime = 0;
 const FAILOVER_COOLDOWN_MS = 30_000; // Prevent rapid failover loops
 export const redisEvents = new EventEmitter();
@@ -28,6 +28,7 @@ export function getActiveRedisUrl() {
 
 /**
  * Manually trigger a failover to the next Redis instance.
+ * Uses a Promise-based mutex to prevent concurrent failover attempts.
  */
 export async function switchToNextRedis() {
   if (config.redisUrls.length <= 1) {
@@ -35,30 +36,41 @@ export async function switchToNextRedis() {
     return false;
   }
 
-  // Prevent rapid failover loops — enforce cooldown between switches
+  // If a failover is already in progress, wait for it instead of starting another
+  if (_failoverPromise) {
+    return _failoverPromise;
+  }
+
+  // Enforce cooldown between switches
   const now = Date.now();
-  if (_failoverInProgress || (now - _lastFailoverTime) < FAILOVER_COOLDOWN_MS) {
-    console.warn('[Redis] Failover skipped — cooldown active or already in progress');
+  if ((now - _lastFailoverTime) < FAILOVER_COOLDOWN_MS) {
+    console.warn('[Redis] Failover skipped — cooldown active');
     return false;
   }
-  _failoverInProgress = true;
-  _lastFailoverTime = now;
 
-  const oldIndex = _currentIndex;
-  _currentIndex = (_currentIndex + 1) % config.redisUrls.length;
-  
-  console.warn(`[Redis] Failing over: ${config.redisUrls[oldIndex]} -> ${config.redisUrls[_currentIndex]}`);
+  _failoverPromise = (async () => {
+    try {
+      _lastFailoverTime = Date.now();
+      const oldIndex = _currentIndex;
+      _currentIndex = (_currentIndex + 1) % config.redisUrls.length;
+      
+      console.warn(`[Redis] Failing over: ${config.redisUrls[oldIndex]} -> ${config.redisUrls[_currentIndex]}`);
 
-  if (_client) {
-    _client.quit().catch(() => {});
-  }
-  
-  _client = createClient(config.redisUrls[_currentIndex]);
-  _failoverInProgress = false;
-  
-  // Notify other services (Queue, Monitoring) to re-initialize
-  redisEvents.emit('failover', { url: config.redisUrls[_currentIndex], index: _currentIndex });
-  return true;
+      if (_client) {
+        _client.quit().catch(() => {});
+      }
+      
+      _client = createClient(config.redisUrls[_currentIndex]);
+      
+      // Notify other services (Queue, Monitoring) to re-initialize
+      redisEvents.emit('failover', { url: config.redisUrls[_currentIndex], index: _currentIndex });
+      return true;
+    } finally {
+      _failoverPromise = null;
+    }
+  })();
+
+  return _failoverPromise;
 }
 
 function createClient(url) {

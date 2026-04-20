@@ -1,6 +1,8 @@
 import { getQueue } from '../queue/index.js';
 import { getBatch } from '../db/batches.js';
 
+const BATCH_CHUNK_SIZE = 50;
+
 export async function queueRoutes(fastify) {
   // GET /v1/queue/status — queue health and counts
   fastify.get('/v1/queue/status', async () => {
@@ -34,23 +36,29 @@ export async function queueRoutes(fastify) {
       return { error: 'Batch not found', batch_id: batchId };
     }
 
-    // Optimization: only fetch the specific jobs listed in the batch
-    const jobs = await Promise.all(
-      batch.job_ids.map(async (jobId, i) => {
-        const job = await queue.getJob(jobId);
-        if (!job) {
-          return { job_id: jobId, prompt_index: i, state: 'deleted', error: 'Job result expired' };
-        }
-        const state = await job.getState();
-        return {
-          job_id: jobId,
-          prompt_index: job.data?.prompt_index ?? i,
-          state,
-          result: state === 'completed' ? job.returnvalue : undefined,
-          error:  state === 'failed' ? job.failedReason : undefined,
-        };
-      })
-    );
+    // Process jobs in chunks to avoid massive concurrent Redis calls
+    const jobs = [];
+    for (let i = 0; i < batch.job_ids.length; i += BATCH_CHUNK_SIZE) {
+      const chunk = batch.job_ids.slice(i, i + BATCH_CHUNK_SIZE);
+      const chunkResults = await Promise.all(
+        chunk.map(async (jobId, ci) => {
+          const idx = i + ci;
+          const job = await queue.getJob(jobId);
+          if (!job) {
+            return { job_id: jobId, prompt_index: idx, state: 'deleted', error: 'Job result expired' };
+          }
+          const state = await job.getState();
+          return {
+            job_id: jobId,
+            prompt_index: job.data?.prompt_index ?? idx,
+            state,
+            result: state === 'completed' ? job.returnvalue : undefined,
+            error:  state === 'failed' ? job.failedReason : undefined,
+          };
+        })
+      );
+      jobs.push(...chunkResults);
+    }
 
     const done = jobs.filter(j => j.state === 'completed').length;
     const failed = jobs.filter(j => j.state === 'failed').length;
@@ -65,11 +73,23 @@ export async function queueRoutes(fastify) {
     };
   });
 
-  // POST /v1/queue/retry — retry all failed jobs
-  fastify.post('/v1/queue/retry', async () => {
+  // POST /v1/queue/retry — retry failed jobs in paginated batches
+  fastify.post('/v1/queue/retry', {
+    schema: {
+      querystring: {
+        type: 'object',
+        properties: {
+          limit: { type: 'integer', minimum: 1, maximum: 1000, default: 200 },
+        },
+      },
+    },
+  }, async (request) => {
     const queue = getQueue();
-    const failedJobs = await queue.getFailed(0, -1);
-    await Promise.all(failedJobs.map(job => job.retry()));
+    const limit = request.query.limit ?? 200;
+    const failedJobs = await queue.getFailed(0, limit - 1);
+    for (let i = 0; i < failedJobs.length; i += BATCH_CHUNK_SIZE) {
+      await Promise.all(failedJobs.slice(i, i + BATCH_CHUNK_SIZE).map(job => job.retry()));
+    }
     return { retried: failedJobs.length };
   });
 
@@ -85,20 +105,34 @@ export async function queueRoutes(fastify) {
     return { paused: false };
   });
 
-  // DELETE /v1/queue/failed — drain (remove) all failed jobs
+  // DELETE /v1/queue/failed — drain (remove) failed jobs in paginated batches
   fastify.delete('/v1/queue/failed', async () => {
     const queue = getQueue();
-    const failedJobs = await queue.getFailed(0, -1);
-    await Promise.all(failedJobs.map(job => job.remove()));
-    return { drained: failedJobs.length };
+    let total = 0;
+    let batch;
+    do {
+      batch = await queue.getFailed(0, BATCH_CHUNK_SIZE - 1);
+      if (batch.length > 0) {
+        await Promise.all(batch.map(job => job.remove()));
+        total += batch.length;
+      }
+    } while (batch.length === BATCH_CHUNK_SIZE);
+    return { drained: total };
   });
 
-  // DELETE /v1/queue/completed — drain (remove) all completed jobs
+  // DELETE /v1/queue/completed — drain (remove) completed jobs in paginated batches
   fastify.delete('/v1/queue/completed', async () => {
     const queue = getQueue();
-    const completedJobs = await queue.getCompleted(0, -1);
-    await Promise.all(completedJobs.map(job => job.remove()));
-    return { drained: completedJobs.length };
+    let total = 0;
+    let batch;
+    do {
+      batch = await queue.getCompleted(0, BATCH_CHUNK_SIZE - 1);
+      if (batch.length > 0) {
+        await Promise.all(batch.map(job => job.remove()));
+        total += batch.length;
+      }
+    } while (batch.length === BATCH_CHUNK_SIZE);
+    return { drained: total };
   });
 
   // POST /v1/queue/jobs/:jobId/retry — retry a single job by id

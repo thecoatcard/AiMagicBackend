@@ -1,6 +1,6 @@
 import { config } from './config.js';
 import { buildServer } from './server.js';
-import { getDb } from './db/client.js';
+import { getDb, closeDb } from './db/client.js';
 import { ensureUserIndexes, ensureOwner, revertExpiredPremiums } from './db/users.js';
 import { ensureTicketIndexes, ensureTicketTextIndex } from './db/tickets.js';
 import { ensureToolsIndexes } from './db/tools.js';
@@ -114,6 +114,9 @@ const handleShutdown = async (signal) => {
   const redis = getRedis();
   await redis.quit();
   server.log.info('[Redis] Connection closed');
+
+  await closeDb();
+  server.log.info('[MongoDB] Connection closed');
 
   process.exit(0);
 };

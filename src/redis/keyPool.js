@@ -279,20 +279,11 @@ export async function clearAllCooldowns() {
 export async function getPoolStats() {
   const redis = getRedis();
 
-  const [activeCount, cooldownEntries] = await Promise.all([
+  const [activeCount, cooldownCount, disabledCount] = await Promise.all([
     redis.llen(ACTIVE_LIST),
-    redis.zrangebyscore(COOLDOWN_ZSET, '-inf', '+inf', 'WITHSCORES'),
+    redis.zcount(COOLDOWN_ZSET, 0, DISABLED_SCORE - 1),
+    redis.zcount(COOLDOWN_ZSET, DISABLED_SCORE, DISABLED_SCORE),
   ]);
-
-  let cooldownCount = 0;
-  let disabledCount = 0;
-  for (let i = 1; i < cooldownEntries.length; i += 2) {
-    if (parseInt(cooldownEntries[i], 10) === DISABLED_SCORE) {
-      disabledCount++;
-    } else {
-      cooldownCount++;
-    }
-  }
 
   return {
     active:   activeCount,
@@ -307,9 +298,8 @@ export async function getPoolStats() {
  * Skips keys that are already present (active or cooldown).
  */
 export async function seedKeysFromEnv(keys) {
-  for (const key of keys) {
-    await addKey(key);
-  }
+  // Use Promise.allSettled to seed all keys concurrently
+  await Promise.allSettled(keys.map(key => addKey(key)));
 }
 
 /**
@@ -340,27 +330,57 @@ export async function syncApiKeysWithDb(client) {
 
   const now = Date.now();
 
-  // Clear current lists to avoid duplicates or orphans during rebuild
-  await redis.del(ACTIVE_LIST, COOLDOWN_ZSET, KEY_REVERSE_MAP);
+  // Shadow swap pattern: build into temporary keys, then atomically rename.
+  // This prevents data loss if the process crashes mid-rebuild.
+  const TMP_ACTIVE = `${ACTIVE_LIST}_tmp_${now}`;
+  const TMP_COOLDOWN = `${COOLDOWN_ZSET}_tmp_${now}`;
+  const TMP_REVERSE = `${KEY_REVERSE_MAP}_tmp_${now}`;
+
+  const pipeline = redis.pipeline();
+  // Clean up any stale temp keys from a previous crash
+  pipeline.del(TMP_ACTIVE, TMP_COOLDOWN, TMP_REVERSE);
 
   for (const k of keys) {
-    // Register reverse lookup for every key
-    await registerReverseLookup(k.key);
-    
+    // Register reverse lookup
+    const masked = maskKey(k.key);
+    pipeline.hset(TMP_REVERSE, masked, k.key);
+
     if (k.status === 'active') {
-      await redis.rpush(ACTIVE_LIST, k.key);
+      pipeline.rpush(TMP_ACTIVE, k.key);
     } else if (k.status === 'disabled') {
-      await redis.zadd(COOLDOWN_ZSET, DISABLED_SCORE, k.key);
+      pipeline.zadd(TMP_COOLDOWN, DISABLED_SCORE, k.key);
     } else if (k.status === 'cooldown' && k.cooldown_until) {
       const until = new Date(k.cooldown_until).getTime();
       if (until > now) {
-        await redis.zadd(COOLDOWN_ZSET, until, k.key);
+        pipeline.zadd(TMP_COOLDOWN, until, k.key);
       } else {
         // Cooldown expired while server was offline — restore to active
-        await redis.rpush(ACTIVE_LIST, k.key);
+        pipeline.rpush(TMP_ACTIVE, k.key);
       }
     }
   }
+  await pipeline.exec();
+
+  // Atomic swap: RENAME temp keys to real keys (or DEL if temp is empty)
+  const swapPipeline = redis.pipeline();
+  swapPipeline.rename(TMP_REVERSE, KEY_REVERSE_MAP);
+  // RENAME fails if source key doesn't exist, so check first
+  const [tmpActiveLen, tmpCooldownLen] = await Promise.all([
+    redis.llen(TMP_ACTIVE),
+    redis.zcard(TMP_COOLDOWN),
+  ]);
+  if (tmpActiveLen > 0) {
+    swapPipeline.rename(TMP_ACTIVE, ACTIVE_LIST);
+  } else {
+    swapPipeline.del(ACTIVE_LIST, TMP_ACTIVE);
+  }
+  if (tmpCooldownLen > 0) {
+    swapPipeline.rename(TMP_COOLDOWN, COOLDOWN_ZSET);
+  } else {
+    swapPipeline.del(COOLDOWN_ZSET, TMP_COOLDOWN);
+  }
+  await swapPipeline.exec();
+
   return true;
 }
 
