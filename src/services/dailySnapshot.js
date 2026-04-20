@@ -6,6 +6,15 @@ import { getAllKeyStats } from '../redis/keyPool.js';
 const SNAPSHOT_COLLECTION = 'daily_snapshots';
 
 /**
+ * Get yesterday's date string in IST (Asia/Kolkata), e.g. "2026-04-19"
+ */
+function yesterdayIST() {
+  const d = new Date();
+  d.setDate(d.getDate() - 1);
+  return d.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+}
+
+/**
  * Get today's date string in IST (Asia/Kolkata), e.g. "2026-04-20"
  */
 function todayIST() {
@@ -13,11 +22,13 @@ function todayIST() {
 }
 
 /**
- * Save today's volatile Redis data to MongoDB.
- * Called by the 11 PM IST cron job.
+ * Save yesterday's volatile Redis data to MongoDB, then clear it.
+ * Called at 12:00 AM IST — snapshots the previous day's data and resets Redis.
+ * Stats are also persisted in real-time to MongoDB (api_keys collection),
+ * so this snapshot is for historical aggregation / dashboards.
  */
 export async function saveSnapshotToMongo() {
-  const date = todayIST();
+  const date = yesterdayIST();
   const db = await getDb();
 
   // 1. Snapshot model health stats
@@ -112,7 +123,7 @@ export async function clearVolatileRedisData() {
 }
 
 /**
- * Full daily rotation: snapshot → clear.
+ * Full daily rotation at 12 AM IST: snapshot yesterday's data → clear Redis counters.
  */
 export async function runDailyRotation() {
   const snapshot = await saveSnapshotToMongo();
@@ -123,8 +134,8 @@ export async function runDailyRotation() {
 /**
  * Hydrate Redis with today's data from MongoDB.
  * Called on startup if Redis has no model health data.
- * This ensures that if the server restarts after the nightly clear,
- * users see today's accumulated data.
+ * Loads key stats from the api_keys collection (real-time persisted),
+ * and model health from the last snapshot if available.
  */
 export async function hydrateFromMongoIfNeeded() {
   const redis = getRedis();
@@ -137,18 +148,33 @@ export async function hydrateFromMongoIfNeeded() {
     return { hydrated: false };
   }
 
-  // No model health data — try to load today's snapshot
-  const date = todayIST();
   const db = await getDb();
-  const snapshot = await db.collection(SNAPSHOT_COLLECTION).findOne({ _id: date });
 
-  if (!snapshot) {
-    console.info('[DailySnapshot] No snapshot found for today, starting fresh');
-    return { hydrated: false, reason: 'no_snapshot' };
+  // Restore key stats from api_keys collection (real-time persisted)
+  const apiKeys = await db.collection('api_keys').find(
+    { 'stats.calls': { $gt: 0 } },
+    { projection: { key: 1, stats: 1 } },
+  ).toArray();
+
+  if (apiKeys.length > 0) {
+    const { createHash } = await import('crypto');
+    const pipeline = redis.pipeline();
+    for (const doc of apiKeys) {
+      if (doc.stats && doc.key) {
+        const hash = createHash('sha256').update(doc.key).digest('hex').slice(0, 6);
+        const masked = doc.key.slice(0, 4) + '…' + hash + '…' + doc.key.slice(-4);
+        pipeline.hset('gemini_key_stats', masked, JSON.stringify(doc.stats));
+      }
+    }
+    await pipeline.exec();
   }
 
-  // Restore model health
-  if (snapshot.model_health?.length > 0) {
+  // Try to load model health from the most recent snapshot
+  const date = todayIST();
+  const snapshot = await db.collection(SNAPSHOT_COLLECTION).findOne({ _id: date })
+    || await db.collection(SNAPSHOT_COLLECTION).findOne({}, { sort: { _id: -1 } });
+
+  if (snapshot?.model_health?.length > 0) {
     const pipeline = redis.pipeline();
     for (const m of snapshot.model_health) {
       const key = `model_health:${m.model}`;
@@ -164,17 +190,8 @@ export async function hydrateFromMongoIfNeeded() {
     await pipeline.exec();
   }
 
-  // Restore key stats
-  if (snapshot.key_stats && Object.keys(snapshot.key_stats).length > 0) {
-    const pipeline = redis.pipeline();
-    for (const [maskedKey, stats] of Object.entries(snapshot.key_stats)) {
-      pipeline.hset('gemini_key_stats', maskedKey, JSON.stringify(stats));
-    }
-    await pipeline.exec();
-  }
-
-  console.info(`[DailySnapshot] Hydrated Redis from ${date} snapshot (${snapshot.model_health?.length || 0} models, ${Object.keys(snapshot.key_stats || {}).length} keys)`);
-  return { hydrated: true, date };
+  console.info(`[DailySnapshot] Hydrated Redis (${apiKeys.length} key stats, ${snapshot?.model_health?.length || 0} models)`);
+  return { hydrated: true, keyStats: apiKeys.length, models: snapshot?.model_health?.length || 0 };
 }
 
 /**

@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import { config } from '../config.js';
-import { getKey, returnKey, cooldownKey, disableKey, recordKeySuccess, recordKeyFailure } from '../redis/keyPool.js';
+import { getKey, returnKey, cooldownKey, disableKey, recordKeySuccess, recordKeyFailure, isPoolExhausted } from '../redis/keyPool.js';
 import { recordSuccess, recordFailure, getBestModel } from '../redis/modelHealth.js';
 import { getFallbackModels } from '../redis/modelConfig.js';
 import { streamGenerateContent } from '../services/gemini.js';
@@ -138,11 +138,11 @@ export async function streamRoutes(fastify) {
         if (model429Count < 3) {
           logError({ type: '429', model: currentModel, key_masked: lastKeyMasked, message: `Rate limit hit ${model429Count}/3` });
           keyCooldownsTotal.inc();
-          await cooldownKey(key, config.cooldownMs);
+          await cooldownKey(key, config.cooldownMs * 2, '429_rate_limit');
           continue; // same model, rotate key
         }
         logError({ type: '429_EXHAUSTED', model: currentModel, key_masked: lastKeyMasked, message: 'Rate limit hit 3 times, switching model' });
-        await cooldownKey(key, config.cooldownMs); // Still cooldown the key that triggered it
+        await cooldownKey(key, config.cooldownMs * 2, '429_exhausted'); // Still cooldown the key that triggered it
       }
 
       // Handle 5xx and explicit 4xx switches (400, 404)
@@ -171,7 +171,7 @@ export async function streamRoutes(fastify) {
 
       if (result.status === 401 || result.status === 403) {
         result.bodyStream.destroy();
-        await disableKey(key);
+        await disableKey(key, 'key_invalid');
         recordKeyFailure(lastKeyMasked).catch(() => {});
         logError({ type: 'key_invalid', model: currentModel, key_masked: lastKeyMasked, message: `Status ${result.status}: API Key is invalid` });
         continue; // try next key

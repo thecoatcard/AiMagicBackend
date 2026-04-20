@@ -9,6 +9,7 @@ const KEY_POOL_LOW_THRESHOLD = parseInt(process.env.KEY_POOL_LOW_THRESHOLD || '5
 const ACTIVE_LIST = 'gemini_keys';
 const COOLDOWN_ZSET = 'gemini_keys_cooldown';
 const KEY_STATS_HASH = 'gemini_key_stats'; // Hash: maskedKey -> JSON { calls, success, fail }
+const KEY_REVERSE_MAP = 'gemini_key_reverse'; // Hash: maskedKey -> rawKey (O(1) reverse lookup)
 // Score used to permanently disable a key (year 9999)
 const DISABLED_SCORE = 253402300799000;
 
@@ -23,29 +24,35 @@ function maskKey(key) {
 }
 
 /**
- * Resolve a masked key back to the actual raw key by scanning both pools.
- * Uses the embedded hash to avoid collisions.
+ * Resolve a masked key back to the actual raw key using the reverse lookup hash.
+ * O(1) instead of O(N) — no scanning required.
  * Returns null if no match is found.
  */
 async function resolveRawKey(maskedKey) {
-  // If the key doesn't look masked, return as-is (it's already raw)
   if (!maskedKey.includes('…')) return maskedKey;
+  const raw = await getRedis().hget(KEY_REVERSE_MAP, maskedKey);
+  return raw || null;
+}
 
+/**
+ * Register a key in the reverse lookup hash (masked → raw).
+ */
+async function registerReverseLookup(key) {
+  const masked = maskKey(key);
+  await getRedis().hset(KEY_REVERSE_MAP, masked, key);
+}
+
+/**
+ * Check if the key pool is exhausted (circuit breaker).
+ * Returns true if no active keys AND no cooldown keys expiring within 5s.
+ */
+export async function isPoolExhausted() {
   const redis = getRedis();
-
-  // Check active list
-  const activeKeys = await redis.lrange(ACTIVE_LIST, 0, -1);
-  for (const k of activeKeys) {
-    if (maskKey(k) === maskedKey) return k;
-  }
-
-  // Check cooldown ZSET
-  const cooldownKeys = await redis.zrangebyscore(COOLDOWN_ZSET, '-inf', '+inf');
-  for (const k of cooldownKeys) {
-    if (maskKey(k) === maskedKey) return k;
-  }
-
-  return null;
+  const [activeCount, nearExpiry] = await Promise.all([
+    redis.llen(ACTIVE_LIST),
+    redis.zrangebyscore(COOLDOWN_ZSET, 0, Date.now() + 5000, 'LIMIT', 0, 1),
+  ]);
+  return activeCount === 0 && nearExpiry.length === 0;
 }
 
 /**
@@ -77,31 +84,34 @@ export async function returnKey(key) {
  * Move a key to the cooldown ZSET with an expiry timestamp.
  * @param {string} key
  * @param {number} ttlMs - duration in ms (use DISABLED_SCORE for permanent disable)
+ * @param {string} [reason] - why the key was cooled down (e.g. '429', '503', 'admin')
  */
-export async function cooldownKey(key, ttlMs) {
+export async function cooldownKey(key, ttlMs, reason = 'unknown') {
   const expireAt = Date.now() + ttlMs;
   const redis = getRedis();
   await redis.lrem(ACTIVE_LIST, 0, key);
   await redis.zadd(COOLDOWN_ZSET, expireAt, key);
   
-  // Sync to MongoDB
-  await upsertApiKey(key, { status: 'cooldown', cooldownUntil: new Date(expireAt) });
+  // Sync to MongoDB with reason
+  await upsertApiKey(key, { status: 'cooldown', cooldownUntil: new Date(expireAt), reason });
   
   checkPoolLow(redis).catch(() => {});
 }
 
 /**
  * Permanently disable a key (moves to cooldown with far-future score).
+ * @param {string} key
+ * @param {string} [reason] - why the key was disabled (e.g. 'key_invalid', 'admin')
  */
-export async function disableKey(key) {
+export async function disableKey(key, reason = 'unknown') {
   const redis = getRedis();
   const rawKey = await resolveRawKey(key);
   if (!rawKey) return; // Key not found in any pool
   await redis.lrem(ACTIVE_LIST, 0, rawKey);
   await redis.zadd(COOLDOWN_ZSET, DISABLED_SCORE, rawKey);
   
-  // Sync to MongoDB
-  await upsertApiKey(rawKey, { status: 'disabled' });
+  // Sync to MongoDB with reason
+  await upsertApiKey(rawKey, { status: 'disabled', reason });
   
   checkPoolLow(redis).catch(() => {});
 }
@@ -149,7 +159,8 @@ export async function addKey(key) {
   if (result === 1) return { added: false, reason: 'already_active' };
   if (result === 2) return { added: false, reason: 'in_cooldown' };
   
-  // Sync to MongoDB
+  // Register reverse lookup and sync to MongoDB
+  await registerReverseLookup(key);
   await upsertApiKey(key, { status: 'active' });
   
   return { added: true };
@@ -165,6 +176,7 @@ export async function removeKey(key) {
     redis.lrem(ACTIVE_LIST, 0, key),
     redis.zrem(COOLDOWN_ZSET, key),
     redis.hdel(KEY_STATS_HASH, masked),
+    redis.hdel(KEY_REVERSE_MAP, masked),
     removeKeyFromDb(key),
   ]);
   return { removed: true };
@@ -329,9 +341,12 @@ export async function syncApiKeysWithDb(client) {
   const now = Date.now();
 
   // Clear current lists to avoid duplicates or orphans during rebuild
-  await redis.del(ACTIVE_LIST, COOLDOWN_ZSET);
+  await redis.del(ACTIVE_LIST, COOLDOWN_ZSET, KEY_REVERSE_MAP);
 
   for (const k of keys) {
+    // Register reverse lookup for every key
+    await registerReverseLookup(k.key);
+    
     if (k.status === 'active') {
       await redis.rpush(ACTIVE_LIST, k.key);
     } else if (k.status === 'disabled') {
@@ -352,6 +367,7 @@ export async function syncApiKeysWithDb(client) {
 /**
  * Record a successful API call for a key (by masked key).
  * Uses atomic Lua script to prevent race conditions under concurrency.
+ * Persists to MongoDB simultaneously so stats survive Redis restarts.
  * @param {string} maskedKey
  */
 export async function recordKeySuccess(maskedKey) {
@@ -369,11 +385,14 @@ export async function recordKeySuccess(maskedKey) {
     return 1
   `;
   await getRedis().eval(lua, 1, KEY_STATS_HASH, maskedKey);
+  // Persist to MongoDB (fire-and-forget, don't block the response)
+  persistStatToMongo(maskedKey, { $inc: { 'stats.calls': 1, 'stats.success': 1 } }).catch(() => {});
 }
 
 /**
  * Record a failed API call for a key (by masked key).
  * Uses atomic Lua script to prevent race conditions under concurrency.
+ * Persists to MongoDB simultaneously so stats survive Redis restarts.
  * @param {string} maskedKey
  */
 export async function recordKeyFailure(maskedKey) {
@@ -391,6 +410,23 @@ export async function recordKeyFailure(maskedKey) {
     return 1
   `;
   await getRedis().eval(lua, 1, KEY_STATS_HASH, maskedKey);
+  // Persist to MongoDB (fire-and-forget, don't block the response)
+  persistStatToMongo(maskedKey, { $inc: { 'stats.calls': 1, 'stats.fail': 1 } }).catch(() => {});
+}
+
+/**
+ * Persist a stats increment to MongoDB atomically.
+ * Uses the raw key from the reverse map to find the api_keys document.
+ */
+async function persistStatToMongo(maskedKey, update) {
+  const rawKey = await resolveRawKey(maskedKey);
+  if (!rawKey) return;
+  const { getDb } = await import('../db/client.js');
+  const db = await getDb();
+  await db.collection('api_keys').updateOne(
+    { key: rawKey },
+    { ...update, $set: { stats_updated_at: new Date() } },
+  );
 }
 
 /**

@@ -221,7 +221,7 @@ setInterval(async () => {
 // Daily summary — fires once per day at 08:00 UTC
 scheduleDailySummary();
 
-// Daily Redis rotation — fires at 11:00 PM IST (17:30 UTC)
+// Daily Redis rotation — fires at 12:00 AM IST (18:30 UTC)
 scheduleDailyRotation();
 
 // Premium Expiry Cleanup — runs once on startup and then every hour
@@ -301,21 +301,21 @@ function scheduleDailySummary() {
   }, msUntilFirst);
 }
 
-// 11 PM IST = 17:30 UTC (IST is UTC+5:30)
+// 12:00 AM IST = 18:30 UTC (IST is UTC+5:30)
 function scheduleDailyRotation() {
   const now = new Date();
-  const next1130pm = new Date(Date.UTC(
-    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 17, 30, 0, 0,
+  const nextMidnightIST = new Date(Date.UTC(
+    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 18, 30, 0, 0,
   ));
-  if (now >= next1130pm) next1130pm.setUTCDate(next1130pm.getUTCDate() + 1);
-  const msUntilFirst = next1130pm - now;
+  if (now >= nextMidnightIST) nextMidnightIST.setUTCDate(nextMidnightIST.getUTCDate() + 1);
+  const msUntilFirst = nextMidnightIST - now;
 
   const hoursUntil = (msUntilFirst / 3600000).toFixed(1);
-  server.log.info(`[DailyRotation] Next run in ${hoursUntil}h (11:00 PM IST)`);
+  server.log.info(`[DailyRotation] Next run in ${hoursUntil}h (12:00 AM IST)`);
 
   setTimeout(async function tick() {
     try {
-      server.log.info('[DailyRotation] Starting nightly snapshot & cleanup...');
+      server.log.info('[DailyRotation] Starting midnight snapshot & cleanup...');
       const result = await runDailyRotation();
       server.log.info({ result }, '[DailyRotation] Completed successfully');
     } catch (err) {

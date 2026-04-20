@@ -83,15 +83,24 @@ export async function resetModelStats(model) {
 /**
  * Pick the best model from a list of candidates based on live health scores.
  * Falls back to the first candidate if no health data exists yet.
+ * Caches result for 30s to avoid recalculating on every request.
  *
  * Score = success_rate - (fail_503_rate * 0.3) - (fail_timeout_rate * 0.2)
  *
  * @param {string[]} candidates
  * @returns {Promise<string>}
  */
+let _bestModelCache = { key: null, model: null, expiresAt: 0 };
+
 export async function getBestModel(candidates) {
   if (candidates.length === 0) return null;
   if (candidates.length === 1) return candidates[0];
+
+  // Check cache (keyed by sorted candidate list)
+  const cacheKey = candidates.join(',');
+  if (_bestModelCache.key === cacheKey && Date.now() < _bestModelCache.expiresAt) {
+    return _bestModelCache.model;
+  }
 
   const redis = getRedis();
   const pipeline = redis.pipeline();
@@ -109,6 +118,9 @@ export async function getBestModel(candidates) {
       best = candidates[i];
     }
   }
+
+  // Cache for 30 seconds
+  _bestModelCache = { key: cacheKey, model: best, expiresAt: Date.now() + 30_000 };
 
   return best;
 }

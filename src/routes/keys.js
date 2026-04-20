@@ -46,7 +46,7 @@ export async function keysRoutes(fastify) {
   // Disable a key (move from active → permanent disabled)
   fastify.patch('/v1/keys/:key/disable', async (request, reply) => {
     const key = decodeURIComponent(request.params.key);
-    await disableKey(key);
+    await disableKey(key, 'admin');
     notifyAdminKeyDisabled({ maskedKey: maskKey(key) });
     writeAuditLog({ actorEmail: request.user.email, action: 'key_disable', meta: { key: maskKey(key) } });
     reply.status(200);
@@ -88,7 +88,7 @@ export async function keysRoutes(fastify) {
   }, async (request) => {
     const results = [];
     for (const key of request.body.keys) {
-      await disableKey(key);
+      await disableKey(key, 'admin');
       notifyAdminKeyDisabled({ maskedKey: maskKey(key) });
       results.push({ key: maskKey(key), status: 'disabled' });
     }

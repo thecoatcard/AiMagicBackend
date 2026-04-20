@@ -1,6 +1,6 @@
 import { randomUUID, createHash } from 'crypto';
 import { config } from '../config.js';
-import { getKey, returnKey, cooldownKey, disableKey, recordKeySuccess, recordKeyFailure } from '../redis/keyPool.js';
+import { getKey, returnKey, cooldownKey, disableKey, recordKeySuccess, recordKeyFailure, isPoolExhausted } from '../redis/keyPool.js';
 import { generateContent, embedContent, batchEmbedContents, generateImage } from './gemini.js';
 import { recordSuccess, recordFailure, getBestModel } from '../redis/modelHealth.js';
 import { getFallbackModels, getImageModels } from '../redis/modelConfig.js';
@@ -15,6 +15,11 @@ import {
   model503Total,
   modelTimeoutsTotal,
 } from '../metrics/index.js';
+
+// Error-type-specific cooldown durations
+const COOLDOWN_429 = config.cooldownMs * 2;       // 429 rate limit → longer cooldown (2x)
+const COOLDOWN_503 = Math.round(config.cooldownMs * 0.5); // 503 server error → shorter cooldown (0.5x)
+const COOLDOWN_DEFAULT = config.cooldownMs;        // Default cooldown
 
 export function maskKey(key) {
   if (!key || key.length <= 8) return '****';
@@ -54,6 +59,14 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
 
   for (let attempt = 0; attempt < config.maxRetries; attempt++) {
     if (attempt > 0) retries++;
+
+    // Circuit breaker: fast-fail if pool is completely exhausted
+    if (attempt > 0 && await isPoolExhausted()) {
+      logRequest({ request_id: reqId, model: currentModel, api_key_masked: lastKeyMasked, latency_ms: 0, status: 'error', retries, prompt_length: prompt?.length ?? 0, user_email: userEmail });
+      requestsTotal.inc({ model: currentModel ?? 'unknown', status: 'pool_exhausted' });
+      notifyAdminNoKeys();
+      return { error: 'Key pool exhausted — all keys in cooldown', code: 'POOL_EXHAUSTED', request_id: reqId, httpStatus: 503 };
+    }
 
     const key = await getKey();
     if (!key) {
@@ -121,7 +134,7 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
       model429Count++;
       recordKeyFailure(lastKeyMasked).catch(() => {});
       if (model429Count < 3) {
-        await cooldownKey(key, config.cooldownMs);
+        await cooldownKey(key, COOLDOWN_429, '429_rate_limit');
         logError({ type: '429', model: currentModel, key_masked: lastKeyMasked, message: `Rate limit hit ${model429Count}/3` });
         keyCooldownsTotal.inc();
         recordFailureRateTick().catch(() => {});
@@ -130,7 +143,7 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
       }
       // Hit 3 times -> Fall through to model switching logic
       logError({ type: '429_EXHAUSTED', model: currentModel, key_masked: lastKeyMasked, message: 'Rate limit hit 3 times, switching model' });
-      await cooldownKey(key, config.cooldownMs); // Still cooldown the key that triggered it
+      await cooldownKey(key, COOLDOWN_429, '429_exhausted'); // Still cooldown the key that triggered it
     }
 
     // Handle 5xx and explicit 4xx switches (400, 404)
@@ -163,7 +176,7 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
     }
 
     if (result.status === 401 || result.status === 403) {
-      await disableKey(key);
+      await disableKey(key, 'key_invalid');
       recordKeyFailure(lastKeyMasked).catch(() => {});
       logError({ type: 'key_invalid', model: currentModel, key_masked: lastKeyMasked, message: `Status ${result.status}: API Key is invalid or revoked` });
       recordFailureRateTick().catch(() => {});
@@ -199,6 +212,13 @@ export async function runEmbed({ text, model, requestId, userEmail } = {}) {
 
   for (let attempt = 0; attempt < config.maxRetries; attempt++) {
     if (attempt > 0) retries++;
+
+    // Circuit breaker: fast-fail if pool is completely exhausted
+    if (attempt > 0 && await isPoolExhausted()) {
+      logRequest({ request_id: reqId, model: currentModel, api_key_masked: lastKeyMasked, latency_ms: 0, status: 'error', retries, user_email: userEmail });
+      notifyAdminNoKeys();
+      return { error: 'Key pool exhausted — all keys in cooldown', code: 'POOL_EXHAUSTED', request_id: reqId, httpStatus: 503 };
+    }
 
     const key = await getKey();
     if (!key) {
@@ -248,14 +268,14 @@ export async function runEmbed({ text, model, requestId, userEmail } = {}) {
     if (result.status === 429) {
       model429Count++;
       if (model429Count < 3) {
-        await cooldownKey(key, config.cooldownMs);
+        await cooldownKey(key, COOLDOWN_429, '429_rate_limit');
         logError({ type: '429', model: currentModel, key_masked: lastKeyMasked });
         keyCooldownsTotal.inc();
         recordFailureRateTick().catch(() => {});
         lastError = '429';
         continue;
       }
-      await cooldownKey(key, config.cooldownMs);
+      await cooldownKey(key, COOLDOWN_429, '429_exhausted');
       logError({ type: '429_EXHAUSTED', model: currentModel, key_masked: lastKeyMasked });
       break; // No fallback chain for embeddings yet
     }
@@ -271,7 +291,7 @@ export async function runEmbed({ text, model, requestId, userEmail } = {}) {
     }
 
     if (result.status === 401 || result.status === 403) {
-      await disableKey(key);
+      await disableKey(key, 'key_invalid');
       logError({ type: 'key_invalid', model: currentModel, key_masked: lastKeyMasked });
       recordFailureRateTick().catch(() => {});
       lastError = 'key_invalid';
@@ -360,7 +380,7 @@ export async function runImageGeneration({ prompt, options = {}, requestId, user
     if (result.status === 429) {
       model429Count++;
       recordKeyFailure(lastKeyMasked).catch(() => {});
-      await cooldownKey(key, config.cooldownMs);
+      await cooldownKey(key, COOLDOWN_429, '429_rate_limit');
       if (model429Count < 3) {
         lastError = '429';
         continue; // same model, rotate key
@@ -385,7 +405,7 @@ export async function runImageGeneration({ prompt, options = {}, requestId, user
 
     if (result.status === 401 || result.status === 403) {
       recordKeyFailure(lastKeyMasked).catch(() => {});
-      await disableKey(key);
+      await disableKey(key, 'key_invalid');
       lastError = 'key_invalid';
       continue; // try next key, same model
     }
