@@ -16,6 +16,7 @@ import {
 } from '../services/notifications.js';
 import { writeAuditLog } from '../db/auditLog.js';
 import { createReadStream, existsSync } from 'fs';
+import path from 'path';
 import { ObjectId } from 'mongodb';
 import { getToolsBucket } from '../db/gridfs.js';
 
@@ -142,6 +143,12 @@ export async function ticketsRoutes(fastify) {
 
     // 2. Fallback to Disk (Legacy)
     if (ticket.screenshot_path && existsSync(ticket.screenshot_path)) {
+      const normalizedPath = path.resolve(ticket.screenshot_path);
+      const uploadsDir = path.resolve('uploads');
+      if (!normalizedPath.startsWith(uploadsDir + path.sep) && normalizedPath !== uploadsDir) {
+        reply.status(403);
+        return { error: 'Forbidden', code: 'FORBIDDEN' };
+      }
       const ext = ticket.screenshot_path.split('.').pop().toLowerCase();
       const mimeTypesMapping = {
         png: 'image/png',

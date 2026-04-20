@@ -10,7 +10,7 @@ export async function checkMaintenanceMode(request, reply) {
 
   const inMaintenance = await isMaintenanceMode();
   if (inMaintenance) {
-    reply.status(503).send({
+    return reply.status(503).send({
       error: 'Service is temporarily under maintenance. Please try again later.',
       code:  'MAINTENANCE_MODE',
     });
@@ -24,7 +24,7 @@ export async function checkMaintenanceMode(request, reply) {
 export async function checkGenerationEnabled(request, reply) {
   const enabled = await isGenerationEnabled();
   if (!enabled) {
-    reply.status(503).send({
+    return reply.status(503).send({
       error: 'Content generation is temporarily disabled by the administrator.',
       code:  'GENERATION_DISABLED',
     });

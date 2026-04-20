@@ -1,4 +1,5 @@
 import { createReadStream, existsSync } from 'fs';
+import path from 'path';
 import { ObjectId } from 'mongodb';
 import { getAllSystemConfig } from '../redis/systemConfig.js';
 import { getToolsBucket } from '../db/gridfs.js';
@@ -37,6 +38,12 @@ export async function systemRoutes(fastify) {
     // 2. Fallback to disk (Legacy)
     const qrPath = cfg.payment_qr_path;
     if (qrPath && existsSync(qrPath)) {
+      const normalizedPath = path.resolve(qrPath);
+      const uploadsDir = path.resolve('uploads');
+      if (!normalizedPath.startsWith(uploadsDir + path.sep) && normalizedPath !== uploadsDir) {
+        reply.status(403);
+        return { error: 'Forbidden: invalid file path', code: 'FORBIDDEN' };
+      }
       const ext = qrPath.split('.').pop().toLowerCase();
       const mimeTypes = {
         png: 'image/png',

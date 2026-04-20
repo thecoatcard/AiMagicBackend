@@ -4,6 +4,9 @@ import { config } from '../config.js';
 
 let _client;
 let _currentIndex = 0;
+let _failoverInProgress = false;
+let _lastFailoverTime = 0;
+const FAILOVER_COOLDOWN_MS = 30_000; // Prevent rapid failover loops
 export const redisEvents = new EventEmitter();
 
 /**
@@ -32,6 +35,15 @@ export async function switchToNextRedis() {
     return false;
   }
 
+  // Prevent rapid failover loops — enforce cooldown between switches
+  const now = Date.now();
+  if (_failoverInProgress || (now - _lastFailoverTime) < FAILOVER_COOLDOWN_MS) {
+    console.warn('[Redis] Failover skipped — cooldown active or already in progress');
+    return false;
+  }
+  _failoverInProgress = true;
+  _lastFailoverTime = now;
+
   const oldIndex = _currentIndex;
   _currentIndex = (_currentIndex + 1) % config.redisUrls.length;
   
@@ -42,6 +54,7 @@ export async function switchToNextRedis() {
   }
   
   _client = createClient(config.redisUrls[_currentIndex]);
+  _failoverInProgress = false;
   
   // Notify other services (Queue, Monitoring) to re-initialize
   redisEvents.emit('failover', { url: config.redisUrls[_currentIndex], index: _currentIndex });

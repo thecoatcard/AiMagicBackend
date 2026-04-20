@@ -119,11 +119,12 @@ export async function updateTool(id, updates) {
 export async function toggleToolActive(id) {
   try {
     const db = await getDb();
-    const tool = await db.collection('tools').findOne({ _id: new ObjectId(id) });
-    if (!tool) return null;
+    // Use aggregation pipeline update to atomically toggle is_active without TOCTOU race
     const result = await db.collection('tools').findOneAndUpdate(
       { _id: new ObjectId(id) },
-      { $set: { is_active: !tool.is_active, updated_at: new Date() } },
+      [
+        { $set: { is_active: { $not: '$is_active' }, updated_at: new Date() } },
+      ],
       { returnDocument: 'after' },
     );
     return serialize(result);

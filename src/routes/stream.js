@@ -104,7 +104,9 @@ export async function streamRoutes(fastify) {
       try {
         result = await streamGenerateContent(key, currentModel, prompt ?? '', options);
         // Prevent "Unhandled 'error' event" crash if the stream is destroyed or aborted
-        result.bodyStream?.on('error', () => { });
+        result.bodyStream?.on('error', (err) => {
+          fastify.log.warn({ err }, '[stream] bodyStream error');
+        });
       } catch (err) {
         await returnKey(key);
 
@@ -205,11 +207,11 @@ export async function streamRoutes(fastify) {
 
       // CORS — @fastify/cors onSend hook is skipped after hijack(), set manually.
       const requestOrigin = request.headers.origin;
-      const allowedOrigins = (process.env.CORS_ORIGINS || '')
+      const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:3001')
         .split(',').map(o => o.trim()).filter(Boolean);
       const corsOrigin = allowedOrigins.includes(requestOrigin)
         ? requestOrigin
-        : (allowedOrigins[0] ?? '*');
+        : (allowedOrigins[0] || 'http://localhost:3001');
 
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
@@ -233,7 +235,19 @@ export async function streamRoutes(fastify) {
 
           // write() returns false when kernel send-buffer is full (backpressure).
           const ok = res.write(chunk);
-          if (!ok) await new Promise(resolve => res.once('drain', resolve));
+          if (!ok) {
+            await new Promise((resolve) => {
+              const onDrain = () => { cleanup(); resolve(); };
+              const onClose = () => { cleanup(); resolve(); };
+              const cleanup = () => {
+                res.removeListener('drain', onDrain);
+                res.removeListener('close', onClose);
+              };
+              res.once('drain', onDrain);
+              res.once('close', onClose);
+            });
+            if (res.writableEnded) break;
+          }
         }
       } catch (streamErr) {
         streamStatus = 'error';

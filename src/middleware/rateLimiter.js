@@ -29,13 +29,9 @@ export async function checkUserRateLimit(request, reply) {
   const minKey = `rate:${email}:min`;
   const dayKey = `rate:${email}:day`;
 
-  const [minCount, dayCount] = await Promise.all([
-    redis.incr(minKey),
-    redis.incr(dayKey),
-  ]);
-
-  if (minCount === 1) redis.expire(minKey, 60);
-  if (dayCount === 1) redis.expire(dayKey, 86400);
+  // Check per-minute limit first to avoid inflating daily counter on rejected requests
+  const minCount = await redis.incr(minKey);
+  if (minCount === 1) await redis.expire(minKey, 60);
 
   if (minCount > maxPerMin) {
     const ttl = await redis.ttl(minKey);
@@ -46,6 +42,10 @@ export async function checkUserRateLimit(request, reply) {
     });
     return;
   }
+
+  // Per-minute OK — now increment and check daily counter
+  const dayCount = await redis.incr(dayKey);
+  if (dayCount === 1) await redis.expire(dayKey, 86400);
 
   if (dayCount > maxPerDay) {
     const ttl = await redis.ttl(dayKey);
@@ -88,13 +88,9 @@ export async function checkBatchRateLimit(request, reply) {
   const minKey = `rate:${email}:min`;
   const dayKey = `rate:${email}:day`;
 
-  const [minCount, dayCount] = await Promise.all([
-    redis.incrby(minKey, count),
-    redis.incrby(dayKey, count),
-  ]);
-
-  if (minCount === count) redis.expire(minKey, 60);
-  if (dayCount === count) redis.expire(dayKey, 86400);
+  // Check per-minute limit first to avoid inflating daily counter on rejected requests
+  const minCount = await redis.incrby(minKey, count);
+  if (minCount === count) await redis.expire(minKey, 60);
 
   if (minCount > maxPerMin) {
     const ttl = await redis.ttl(minKey);
@@ -105,6 +101,10 @@ export async function checkBatchRateLimit(request, reply) {
     });
     return;
   }
+
+  // Per-minute OK — now increment and check daily counter
+  const dayCount = await redis.incrby(dayKey, count);
+  if (dayCount === count) await redis.expire(dayKey, 86400);
 
   if (dayCount > maxPerDay) {
     const ttl = await redis.ttl(dayKey);

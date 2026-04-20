@@ -5,7 +5,7 @@
 export async function requireAdmin(request, reply) {
   const role = request.user?.role;
   if (role !== 'admin' && role !== 'owner') {
-    reply.status(403).send({ error: 'Forbidden: Admin only', code: 'FORBIDDEN' });
+    return reply.status(403).send({ error: 'Forbidden: Admin only', code: 'FORBIDDEN' });
   }
 }
 
@@ -15,7 +15,7 @@ export async function requireAdmin(request, reply) {
  */
 export async function requireOwner(request, reply) {
   if (request.user?.role !== 'owner') {
-    reply.status(403).send({ error: 'Forbidden: Owner only', code: 'FORBIDDEN' });
+    return reply.status(403).send({ error: 'Forbidden: Owner only', code: 'FORBIDDEN' });
   }
 }
 
@@ -27,7 +27,7 @@ export async function requireOwner(request, reply) {
 export function requireRole(role) {
   return async function roleGuard(request, reply) {
     if (!request.user || request.user.role !== role) {
-      reply.status(403).send({ error: `Forbidden: ${role} role required`, code: 'FORBIDDEN' });
+      return reply.status(403).send({ error: `Forbidden: ${role} role required`, code: 'FORBIDDEN' });
     }
   };
 }

@@ -218,7 +218,7 @@ export async function listUsersFiltered({ role, plan, status, email, limit = 50,
   if (role)   filter.role   = role;
   if (plan)   filter.plan   = plan;
   if (status) filter.status = status;
-  if (email)  filter.email  = { $regex: email, $options: 'i' };
+  if (email)  filter.email  = { $regex: email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' };
 
   const sortMap = {
     email:   { email: 1 },

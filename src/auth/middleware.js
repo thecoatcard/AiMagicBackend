@@ -26,8 +26,7 @@ export async function authenticate(request, reply) {
   }
 
   if (!token) {
-    reply.status(401).send({ error: 'Missing or malformed Authorization header', code: 'UNAUTHORIZED' });
-    return;
+    return reply.status(401).send({ error: 'Missing or malformed Authorization header', code: 'UNAUTHORIZED' });
   }
 
   // ── Fast path: check if this is an impersonation token ───────────────────
@@ -35,18 +34,16 @@ export async function authenticate(request, reply) {
   try {
     rawPayload = jwt.verify(token, config.jwtSecret);
   } catch (err) {
-    reply.status(401).send({
+    return reply.status(401).send({
       error: err.name === 'TokenExpiredError' ? 'token_expired' : 'invalid_token',
       code: 'UNAUTHORIZED',
     });
-    return;
   }
 
   if (rawPayload.impersonated) {
     // Block mutating actions for impersonated sessions
     if (MUTATING_METHODS.has(request.method)) {
-      reply.status(403).send({ error: 'Impersonated sessions are read-only', code: 'IMPERSONATION_READ_ONLY' });
-      return;
+      return reply.status(403).send({ error: 'Impersonated sessions are read-only', code: 'IMPERSONATION_READ_ONLY' });
     }
     request.user = {
       email:        rawPayload.email,
@@ -61,15 +58,13 @@ export async function authenticate(request, reply) {
   const result = await validateSession(token);
 
   if (!result.valid) {
-    reply.status(401).send({ error: result.reason, code: 'UNAUTHORIZED' });
-    return;
+    return reply.status(401).send({ error: result.reason, code: 'UNAUTHORIZED' });
   }
 
   // Check blocked status from MongoDB (fail open if DB is unavailable)
   const userDoc = await getUser(result.email);
   if (userDoc?.status === 'blocked') {
-    reply.status(403).send({ error: 'Account blocked', code: 'ACCOUNT_BLOCKED' });
-    return;
+    return reply.status(403).send({ error: 'Account blocked', code: 'ACCOUNT_BLOCKED' });
   }
 
   // Determine role: JWT → DB fallback → default 'user'

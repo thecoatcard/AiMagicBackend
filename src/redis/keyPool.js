@@ -57,11 +57,13 @@ export async function cooldownKey(key, ttlMs) {
  */
 export async function disableKey(key) {
   const redis = getRedis();
-  await redis.lrem(ACTIVE_LIST, 0, key);
-  await redis.zadd(COOLDOWN_ZSET, DISABLED_SCORE, key);
+  const rawKey = await resolveRawKey(key);
+  if (!rawKey) return; // Key not found in any pool
+  await redis.lrem(ACTIVE_LIST, 0, rawKey);
+  await redis.zadd(COOLDOWN_ZSET, DISABLED_SCORE, rawKey);
   
   // Sync to MongoDB
-  await upsertApiKey(key, { status: 'disabled' });
+  await upsertApiKey(rawKey, { status: 'disabled' });
   
   checkPoolLow(redis).catch(() => {});
 }
@@ -78,11 +80,13 @@ async function checkPoolLow(redis) {
  */
 export async function enableKey(key) {
   const redis = getRedis();
-  await redis.zrem(COOLDOWN_ZSET, key);
-  await redis.lpush(ACTIVE_LIST, key);
+  const rawKey = await resolveRawKey(key);
+  if (!rawKey) return; // Key not found in any pool
+  await redis.zrem(COOLDOWN_ZSET, rawKey);
+  await redis.lpush(ACTIVE_LIST, rawKey);
   
   // Sync to MongoDB
-  await upsertApiKey(key, { status: 'active' });
+  await upsertApiKey(rawKey, { status: 'active' });
 }
 
 /**
@@ -278,4 +282,36 @@ export async function syncApiKeysWithDb(client) {
 function maskKey(key) {
   if (key.length <= 8) return '****';
   return key.slice(0, 4) + '****' + key.slice(-4);
+}
+
+/**
+ * Resolve a masked key (e.g. "AIza****1234") back to the actual raw key
+ * by scanning both the active list and cooldown ZSET.
+ * Returns null if no match is found.
+ */
+async function resolveRawKey(maskedKey) {
+  // If the key doesn't look masked, return as-is (it's already raw)
+  if (!maskedKey.includes('****')) return maskedKey;
+
+  const prefix = maskedKey.slice(0, 4);
+  const suffix = maskedKey.slice(-4);
+  const redis = getRedis();
+
+  // Check active list
+  const activeKeys = await redis.lrange(ACTIVE_LIST, 0, -1);
+  for (const k of activeKeys) {
+    if (k.length > 8 && k.slice(0, 4) === prefix && k.slice(-4) === suffix) {
+      return k;
+    }
+  }
+
+  // Check cooldown ZSET
+  const cooldownKeys = await redis.zrangebyscore(COOLDOWN_ZSET, '-inf', '+inf');
+  for (const k of cooldownKeys) {
+    if (k.length > 8 && k.slice(0, 4) === prefix && k.slice(-4) === suffix) {
+      return k;
+    }
+  }
+
+  return null;
 }

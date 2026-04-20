@@ -64,7 +64,9 @@ export async function toolsRoutes(fastify) {
     }
 
     // Increment download count (fire-and-forget — don't block the response)
-    incrementDownloadCount(tool.id).catch(() => {});
+    incrementDownloadCount(tool.id).catch(err => {
+      fastify.log.warn({ err, toolId: tool.id }, '[tools] failed to increment download count');
+    });
 
     if (tool.type === 'external') {
       if (!tool.external_url) {

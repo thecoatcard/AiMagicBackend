@@ -51,7 +51,7 @@ export async function generateContent(key, model, prompt, options = {}) {
     return { status: statusCode, data: rawData, latencyMs: Date.now() - start };
   } catch {
     // Non-JSON upstream response — ensure body is drained before returning
-    await resBody.dump();
+    await resBody.dump().catch(() => {});
     return { status: statusCode, data: {}, latencyMs: Date.now() - start };
   }
 }
