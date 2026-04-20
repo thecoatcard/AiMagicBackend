@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { randomUUID, createHash } from 'crypto';
 import { config } from '../config.js';
 import { getKey, returnKey, cooldownKey, disableKey, recordKeySuccess, recordKeyFailure } from '../redis/keyPool.js';
 import { generateContent, embedContent, batchEmbedContents, generateImage } from './gemini.js';
@@ -18,7 +18,8 @@ import {
 
 export function maskKey(key) {
   if (!key || key.length <= 8) return '****';
-  return key.slice(0, 4) + '****' + key.slice(-4);
+  const hash = createHash('sha256').update(key).digest('hex').slice(0, 6);
+  return key.slice(0, 4) + '…' + hash + '…' + key.slice(-4);
 }
 
 /**

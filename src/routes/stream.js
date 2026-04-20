@@ -8,6 +8,7 @@ import { logRequest, logError } from '../db/logger.js';
 import { checkUserRateLimit } from '../middleware/rateLimiter.js';
 import { notifyAdminNoKeys } from '../services/notifications.js';
 import { imagesSchema, historySchema } from './generate.js';
+import { maskKey } from '../services/orchestrator.js';
 import {
   requestsTotal,
   requestDuration,
@@ -16,11 +17,6 @@ import {
   model503Total,
   modelTimeoutsTotal,
 } from '../metrics/index.js';
-
-function maskKey(key) {
-  if (!key || key.length <= 8) return '****';
-  return key.slice(0, 4) + '****' + key.slice(-4);
-}
 
 export async function streamRoutes(fastify) {
   fastify.post('/v1/generate/stream', {

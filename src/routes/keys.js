@@ -2,6 +2,7 @@ import { listKeys, addKey, enableKey, disableKey, clearAllCooldowns, getPoolStat
 import { getDb } from '../db/client.js';
 import { notifyAdminKeyDisabled } from '../services/notifications.js';
 import { writeAuditLog } from '../db/auditLog.js';
+import { maskKey } from '../services/orchestrator.js';
 
 export async function keysRoutes(fastify) {
   // List all keys (masked)
@@ -146,9 +147,4 @@ export async function keysRoutes(fastify) {
       last_used:      stats.last_used,
     };
   });
-}
-
-function maskKey(key) {
-  if (key.length <= 8) return '****';
-  return key.slice(0, 4) + '****' + key.slice(-4);
 }

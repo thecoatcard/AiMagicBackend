@@ -2,6 +2,7 @@ import { getRedis } from './client.js';
 import { config } from '../config.js';
 import { notifyAdminKeyPoolLow } from '../services/notifications.js';
 import { upsertApiKey, removeApiKey as removeKeyFromDb, getAllApiKeys } from '../db/apiKeys.js';
+import { createHash } from 'crypto';
 
 const KEY_POOL_LOW_THRESHOLD = parseInt(process.env.KEY_POOL_LOW_THRESHOLD || '5', 10);
 
@@ -10,6 +11,42 @@ const COOLDOWN_ZSET = 'gemini_keys_cooldown';
 const KEY_STATS_HASH = 'gemini_key_stats'; // Hash: maskedKey -> JSON { calls, success, fail }
 // Score used to permanently disable a key (year 9999)
 const DISABLED_SCORE = 253402300799000;
+
+/**
+ * Mask a key for display: first 4 + short hash + last 4.
+ * Uses SHA256 to avoid collisions between keys sharing the same prefix/suffix.
+ */
+function maskKey(key) {
+  if (!key || key.length <= 8) return '****';
+  const hash = createHash('sha256').update(key).digest('hex').slice(0, 6);
+  return key.slice(0, 4) + '…' + hash + '…' + key.slice(-4);
+}
+
+/**
+ * Resolve a masked key back to the actual raw key by scanning both pools.
+ * Uses the embedded hash to avoid collisions.
+ * Returns null if no match is found.
+ */
+async function resolveRawKey(maskedKey) {
+  // If the key doesn't look masked, return as-is (it's already raw)
+  if (!maskedKey.includes('…')) return maskedKey;
+
+  const redis = getRedis();
+
+  // Check active list
+  const activeKeys = await redis.lrange(ACTIVE_LIST, 0, -1);
+  for (const k of activeKeys) {
+    if (maskKey(k) === maskedKey) return k;
+  }
+
+  // Check cooldown ZSET
+  const cooldownKeys = await redis.zrangebyscore(COOLDOWN_ZSET, '-inf', '+inf');
+  for (const k of cooldownKeys) {
+    if (maskKey(k) === maskedKey) return k;
+  }
+
+  return null;
+}
 
 /**
  * Pop a key from the active pool (RPOP).
@@ -119,14 +156,16 @@ export async function addKey(key) {
 }
 
 /**
- * Remove a key from all Redis lists and MongoDB.
+ * Remove a key from all Redis lists, its stats, and MongoDB.
  */
 export async function removeKey(key) {
   const redis = getRedis();
+  const masked = maskKey(key);
   await Promise.all([
     redis.lrem(ACTIVE_LIST, 0, key),
     redis.zrem(COOLDOWN_ZSET, key),
-    removeKeyFromDb(key)
+    redis.hdel(KEY_STATS_HASH, masked),
+    removeKeyFromDb(key),
   ]);
   return { removed: true };
 }
@@ -263,12 +302,29 @@ export async function seedKeysFromEnv(keys) {
 
 /**
  * Load all API keys from MongoDB and rebuild the Redis key pool.
+ * Validates that MongoDB returned data before clearing Redis to prevent data loss.
  * @param {import('ioredis').Redis} [client]
  */
 export async function syncApiKeysWithDb(client) {
   const redis = client || getRedis();
-  const keys = await getAllApiKeys();
-  if (keys.length === 0) return false;
+  let keys;
+  try {
+    keys = await getAllApiKeys();
+  } catch (err) {
+    console.error('[keyPool] MongoDB query failed during sync, keeping existing Redis state:', err.message);
+    return false;
+  }
+
+  if (!keys || keys.length === 0) {
+    // Check if Redis already has keys — if so, don't wipe them
+    const existingCount = await redis.llen(ACTIVE_LIST);
+    const cooldownCount = await redis.zcard(COOLDOWN_ZSET);
+    if (existingCount + cooldownCount > 0) {
+      console.warn('[keyPool] MongoDB returned 0 keys but Redis has', existingCount + cooldownCount, '— keeping Redis state');
+      return false;
+    }
+    return false;
+  }
 
   const now = Date.now();
 
@@ -293,35 +349,48 @@ export async function syncApiKeysWithDb(client) {
   return true;
 }
 
-function maskKey(key) {
-  if (key.length <= 8) return '****';
-  return key.slice(0, 4) + '****' + key.slice(-4);
-}
-
 /**
  * Record a successful API call for a key (by masked key).
+ * Uses atomic Lua script to prevent race conditions under concurrency.
  * @param {string} maskedKey
  */
 export async function recordKeySuccess(maskedKey) {
-  const redis = getRedis();
-  const raw = await redis.hget(KEY_STATS_HASH, maskedKey);
-  const stats = raw ? JSON.parse(raw) : { calls: 0, success: 0, fail: 0 };
-  stats.calls++;
-  stats.success++;
-  await redis.hset(KEY_STATS_HASH, maskedKey, JSON.stringify(stats));
+  const lua = `
+    local raw = redis.call('HGET', KEYS[1], ARGV[1])
+    local stats
+    if raw then
+      stats = cjson.decode(raw)
+    else
+      stats = { calls = 0, success = 0, fail = 0 }
+    end
+    stats.calls = stats.calls + 1
+    stats.success = stats.success + 1
+    redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(stats))
+    return 1
+  `;
+  await getRedis().eval(lua, 1, KEY_STATS_HASH, maskedKey);
 }
 
 /**
  * Record a failed API call for a key (by masked key).
+ * Uses atomic Lua script to prevent race conditions under concurrency.
  * @param {string} maskedKey
  */
 export async function recordKeyFailure(maskedKey) {
-  const redis = getRedis();
-  const raw = await redis.hget(KEY_STATS_HASH, maskedKey);
-  const stats = raw ? JSON.parse(raw) : { calls: 0, success: 0, fail: 0 };
-  stats.calls++;
-  stats.fail++;
-  await redis.hset(KEY_STATS_HASH, maskedKey, JSON.stringify(stats));
+  const lua = `
+    local raw = redis.call('HGET', KEYS[1], ARGV[1])
+    local stats
+    if raw then
+      stats = cjson.decode(raw)
+    else
+      stats = { calls = 0, success = 0, fail = 0 }
+    end
+    stats.calls = stats.calls + 1
+    stats.fail = stats.fail + 1
+    redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(stats))
+    return 1
+  `;
+  await getRedis().eval(lua, 1, KEY_STATS_HASH, maskedKey);
 }
 
 /**
@@ -336,36 +405,4 @@ export async function getAllKeyStats() {
     try { result[k] = JSON.parse(v); } catch { result[k] = { calls: 0, success: 0, fail: 0 }; }
   }
   return result;
-}
-
-/**
- * Resolve a masked key (e.g. "AIza****1234") back to the actual raw key
- * by scanning both the active list and cooldown ZSET.
- * Returns null if no match is found.
- */
-async function resolveRawKey(maskedKey) {
-  // If the key doesn't look masked, return as-is (it's already raw)
-  if (!maskedKey.includes('****')) return maskedKey;
-
-  const prefix = maskedKey.slice(0, 4);
-  const suffix = maskedKey.slice(-4);
-  const redis = getRedis();
-
-  // Check active list
-  const activeKeys = await redis.lrange(ACTIVE_LIST, 0, -1);
-  for (const k of activeKeys) {
-    if (k.length > 8 && k.slice(0, 4) === prefix && k.slice(-4) === suffix) {
-      return k;
-    }
-  }
-
-  // Check cooldown ZSET
-  const cooldownKeys = await redis.zrangebyscore(COOLDOWN_ZSET, '-inf', '+inf');
-  for (const k of cooldownKeys) {
-    if (k.length > 8 && k.slice(0, 4) === prefix && k.slice(-4) === suffix) {
-      return k;
-    }
-  }
-
-  return null;
 }
