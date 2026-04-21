@@ -11,6 +11,9 @@ import { imagesSchema, historySchema, filesSchema } from './generate.js';
 import { parseFileToContent } from '../services/fileParsers.js';
 import { maskKey } from '../services/orchestrator.js';
 import { recordFailureRateTick } from '../redis/systemConfig.js';
+import { isHivemindEnabled, retrieveContext, storeContext, buildContextPrefix } from '../services/hivemind.js';
+import { runEmbed } from '../services/orchestrator.js';
+import { config as appConfig } from '../config.js';
 import {
   requestsTotal,
   requestDuration,
@@ -86,6 +89,26 @@ export async function streamRoutes(fastify) {
     const userEmail = request.user?.email;
     const promptLength = prompt?.length ?? 0;
     const wallStart = Date.now();
+
+    // ── Hivemind: retrieve relevant prior context for this user ────────────
+    if (isHivemindEnabled() && userEmail && prompt) {
+      try {
+        const embedResult = await runEmbed({ text: prompt, model: appConfig.hivemindEmbeddingModel });
+        const queryVector = embedResult?.embedding?.values;
+        if (queryVector) {
+          const snippets = await retrieveContext(userEmail, queryVector);
+          const prefix = buildContextPrefix(snippets);
+          if (prefix) {
+            options.systemInstruction = options.systemInstruction
+              ? `${prefix}\n\n---\n\n${options.systemInstruction}`
+              : prefix;
+          }
+        }
+      } catch (err) {
+        // Non-critical — proceed without hivemind
+        fastify.log.warn({ err }, '[Hivemind] stream retrieve failed');
+      }
+    }
 
     // ── Model selection — mirrors orchestrator.js logic ──────────────────────
     const fallbackModels = await getFallbackModels();
@@ -247,10 +270,23 @@ export async function streamRoutes(fastify) {
       res.write(': ok\n\n');
 
       let streamStatus = 'success';
+      let streamedText = '';  // Accumulate for hivemind storage
       try {
         for await (const chunk of result.bodyStream) {
           if (res.writableEnded) break;
           if (!chunk || chunk.length === 0) continue;
+
+          // Capture text for hivemind (lightweight — only first 300 chars)
+          if (streamedText.length < 300) {
+            const str = chunk.toString();
+            // Extract text from SSE data lines: data: {"candidates":[{"content":{"parts":[{"text":"..."}]}}]}
+            const matches = str.matchAll(/"text"\s*:\s*"((?:[^"\\]|\\.)*)"/g);
+            for (const m of matches) {
+              if (streamedText.length < 300) {
+                try { streamedText += JSON.parse(`"${m[1]}"`); } catch { /* skip */ }
+              }
+            }
+          }
 
           // write() returns false when kernel send-buffer is full (backpressure).
           const ok = res.write(chunk);
@@ -275,6 +311,18 @@ export async function streamRoutes(fastify) {
         }
       } finally {
         if (!res.writableEnded) res.end();
+
+        // ── Hivemind: store prompt+response for future context (fire-and-forget)
+        if (isHivemindEnabled() && userEmail && prompt && streamedText && streamStatus === 'success') {
+          const snippet = prompt.slice(0, 200) + '\n---\n' + streamedText.slice(0, 300);
+          runEmbed({ text: snippet, model: appConfig.hivemindEmbeddingModel })
+            .then(r => {
+              const vector = r?.embedding?.values;
+              if (vector) return storeContext(userEmail, snippet, vector);
+            })
+            .catch(() => {});
+        }
+
         // Log to MongoDB so /v1/usage and /v1/logs include stream requests —
         // without this, stream requests are invisible to analytics even though
         // they count against quota (incrementUserUsage fires in the preHandler).

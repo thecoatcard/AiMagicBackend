@@ -38,4 +38,11 @@ export const config = {
   // Set OWNER_EMAIL in .env — seeded to DB on startup and used as an
   // emergency override so lockout is impossible even if DB is corrupted.
   ownerEmail: process.env.OWNER_EMAIL || '',
+
+  // Hivemind — per-user embedding context (dedicated Redis)
+  hivemindRedisUrl: process.env.HIVEMIND_REDIS_URL || '',
+  hivemindTtlSecs: parseInt(process.env.HIVEMIND_TTL_SECS || '14400', 10), // 4 hours
+  hivemindTopK: parseInt(process.env.HIVEMIND_TOP_K || '5', 10),
+  hivemindEmbeddingModel: process.env.HIVEMIND_EMBEDDING_MODEL || 'text-embedding-004',
+  hivemindMaxSnippetLen: parseInt(process.env.HIVEMIND_MAX_SNIPPET_LEN || '500', 10),
 };

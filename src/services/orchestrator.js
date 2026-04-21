@@ -7,6 +7,7 @@ import { getFallbackModels, getImageModels } from '../redis/modelConfig.js';
 import { logRequest, logError } from '../db/logger.js';
 import { notifyAdminNoKeys } from './notifications.js';
 import { recordFailureRateTick } from '../redis/systemConfig.js';
+import { isHivemindEnabled, retrieveContext, storeContext, buildContextPrefix } from './hivemind.js';
 import {
   requestsTotal,
   requestDuration,
@@ -40,6 +41,25 @@ export function maskKey(key) {
 export async function runGenerate({ prompt, model, options = {}, requestId, userEmail } = {}) {
   const reqId = requestId ?? randomUUID();
   const wallStart = Date.now();
+
+  // ── Hivemind: retrieve relevant prior context for this user ────────────
+  if (isHivemindEnabled() && userEmail && prompt) {
+    try {
+      const embedResult = await _embedForHivemind(prompt);
+      if (embedResult) {
+        const snippets = await retrieveContext(userEmail, embedResult);
+        const prefix = buildContextPrefix(snippets);
+        if (prefix) {
+          options.systemInstruction = options.systemInstruction
+            ? `${prefix}\n\n---\n\n${options.systemInstruction}`
+            : prefix;
+        }
+      }
+    } catch (err) {
+      // Non-critical — proceed without hivemind context
+      console.warn('[Hivemind] retrieve failed:', err.message);
+    }
+  }
 
   // Load the current fallback chain (admin-configurable, stored in Redis)
   const fallbackModels = await getFallbackModels();
@@ -120,8 +140,16 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
       requestsTotal.inc({ model: currentModel, status: 'success' });
       requestDuration.observe({ model: currentModel }, Date.now() - wallStart);
       if (retries > 0) retriesTotal.inc({ model: currentModel }, retries);
+      const responseText = result.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+      // ── Hivemind: store prompt+response for future context retrieval ────
+      if (isHivemindEnabled() && userEmail && prompt && responseText) {
+        const snippet = prompt.slice(0, 200) + '\n---\n' + responseText.slice(0, 300);
+        _embedAndStore(userEmail, snippet).catch(() => {});
+      }
+
       return {
-        text: result.data?.candidates?.[0]?.content?.parts?.[0]?.text,
+        text: responseText,
         model: currentModel,
         usageMetadata: result.data?.usageMetadata,
         request_id: reqId,
@@ -419,3 +447,27 @@ export async function runImageGeneration({ prompt, options = {}, requestId, user
   return { error: 'All retries exhausted', lastError, code: 'RETRIES_EXHAUSTED', request_id: reqId, httpStatus: 503 };
 }
 
+// ── Hivemind internal helpers (fire-and-forget, non-critical) ────────────────
+
+/**
+ * Embed text for hivemind using the configured embedding model.
+ * Uses internal key rotation via runEmbed.
+ * @returns {Promise<number[]|null>} - Embedding vector or null on failure
+ */
+async function _embedForHivemind(text) {
+  const result = await runEmbed({ text, model: config.hivemindEmbeddingModel });
+  if (result.error) return null;
+  return result.embedding?.values ?? null;
+}
+
+/**
+ * Embed a snippet and store it in hivemind Redis (fire-and-forget).
+ */
+async function _embedAndStore(userEmail, snippet) {
+  try {
+    const vector = await _embedForHivemind(snippet);
+    if (vector) await storeContext(userEmail, snippet, vector);
+  } catch (err) {
+    console.warn('[Hivemind] embedAndStore error:', err.message);
+  }
+}
