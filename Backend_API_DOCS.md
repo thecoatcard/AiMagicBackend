@@ -562,7 +562,7 @@ Generate text embeddings using Gemini's embedding model.
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `text` | string or string[] | ✅ | A single text string or an array of strings to embed |
-| `model` | string | ❌ | Override model. Default: `text-embedding-004` |
+| `model` | string | ❌ | Override model. Default: `gemini-embedding-2-preview` |
 
 #### Single text request
 ```json
@@ -589,7 +589,7 @@ Generate text embeddings using Gemini's embedding model.
   "embedding": {
     "values": [0.0123, -0.0456, 0.0789]
   },
-  "model":      "text-embedding-004",
+  "model":      "gemini-embedding-2-preview",
   "request_id": "a1b2c3d4-...",
   "retries":    0,
   "latency_ms": 320
@@ -3258,7 +3258,7 @@ const batchRes = await fetch('/v1/embeddings', {
   },
   body: JSON.stringify({
     text: ['First text', 'Second text', 'Third text'],
-    model: 'text-embedding-004',
+    model: 'gemini-embedding-2-preview',
   }),
 });
 const data = await batchRes.json();

@@ -43,6 +43,6 @@ export const config = {
   hivemindRedisUrl: process.env.HIVEMIND_REDIS_URL || '',
   hivemindTtlSecs: parseInt(process.env.HIVEMIND_TTL_SECS || '14400', 10), // 4 hours
   hivemindTopK: parseInt(process.env.HIVEMIND_TOP_K || '5', 10),
-  hivemindEmbeddingModel: process.env.HIVEMIND_EMBEDDING_MODEL || 'text-embedding-004',
+  hivemindEmbeddingModel: process.env.HIVEMIND_EMBEDDING_MODEL || 'gemini-embedding-2-preview',
   hivemindMaxSnippetLen: parseInt(process.env.HIVEMIND_MAX_SNIPPET_LEN || '500', 10),
 };

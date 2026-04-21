@@ -26,7 +26,7 @@ vi.mock('../../src/config.js', () => ({
     hivemindRedisUrl: 'redis://localhost:6380',
     hivemindTtlSecs: 14400,
     hivemindTopK: 3,
-    hivemindEmbeddingModel: 'text-embedding-004',
+    hivemindEmbeddingModel: 'gemini-embedding-2-preview',
     hivemindMaxSnippetLen: 500,
   },
 }));

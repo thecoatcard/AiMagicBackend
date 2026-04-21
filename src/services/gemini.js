@@ -94,7 +94,7 @@ export async function streamGenerateContent(key, model, prompt, options = {}) {
  * Call the Gemini embedContent API.
  *
  * @param {string} key    - API key
- * @param {string} model  - e.g. "text-embedding-004"
+ * @param {string} model  - e.g. "gemini-embedding-2-preview"
  * @param {string} text   - text to embed
  * @returns {{ status: number, data: object, latencyMs: number }}
  * @throws {{ code: 'TIMEOUT' }} on request timeout
@@ -139,7 +139,7 @@ export async function embedContent(key, model, text) {
  * Call the Gemini batchEmbedContents API.
  *
  * @param {string}   key    - API key
- * @param {string}   model  - e.g. "text-embedding-004"
+ * @param {string}   model  - e.g. "gemini-embedding-2-preview"
  * @param {string[]} texts  - array of texts to embed
  * @returns {{ status: number, data: object, latencyMs: number }}
  * @throws {{ code: 'TIMEOUT' }} on request timeout

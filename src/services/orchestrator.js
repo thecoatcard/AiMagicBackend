@@ -231,7 +231,7 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
  */
 export async function runEmbed({ text, model, requestId, userEmail } = {}) {
   const reqId = requestId ?? randomUUID();
-  const currentModel = model ?? 'text-embedding-004';
+  const currentModel = model ?? 'gemini-embedding-2-preview';
   
   let lastError = null;
   let retries = 0;
