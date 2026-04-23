@@ -161,8 +161,14 @@ export async function streamRoutes(fastify) {
 
       // Always destroy any stream left over from the previous iteration —
       // prevents socket leaks if a branch above forgot to clean it up.
+      // NOTE: do NOT removeAllListeners() — undici emits 'error' synchronously
+      // on destroy() of an aborted body. Keep our existing handler (or attach
+      // a no-op sink) so the unhandled-error event can never crash the process.
       if (activeBodyStream) {
-        try { activeBodyStream.removeAllListeners(); activeBodyStream.destroy(); } catch { /* noop */ }
+        try {
+          activeBodyStream.on('error', () => {});
+          activeBodyStream.destroy();
+        } catch { /* noop */ }
         activeBodyStream = null;
       }
 
@@ -264,7 +270,10 @@ export async function streamRoutes(fastify) {
       }
 
       if (result.status !== 200) {
-        try { activeBodyStream?.removeAllListeners(); activeBodyStream?.destroy(); } catch { /* noop */ }
+        try {
+          activeBodyStream?.on('error', () => {});
+          activeBodyStream?.destroy();
+        } catch { /* noop */ }
         activeBodyStream = null;
         await returnKey(key);
         await recordFailure(currentModel, 'other');
@@ -414,7 +423,10 @@ export async function streamRoutes(fastify) {
     // Final teardown: any stream from the last attempt that broke out of the
     // loop (e.g. via `if (!currentModel) break;`) must not be left dangling.
     if (activeBodyStream) {
-      try { activeBodyStream.removeAllListeners(); activeBodyStream.destroy(); } catch { /* noop */ }
+      try {
+        activeBodyStream.on('error', () => {});
+        activeBodyStream.destroy();
+      } catch { /* noop */ }
       activeBodyStream = null;
     }
     logRequest({ request_id: requestId, model: currentModel, api_key_masked: lastKeyMasked, latency_ms: 0, status: 'exhausted', retries, prompt_length: promptLength, user_email: userEmail });
