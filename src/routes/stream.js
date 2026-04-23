@@ -10,7 +10,7 @@ import { notifyAdminNoKeys } from '../services/notifications.js';
 import { imagesSchema, historySchema, filesSchema } from './generate.js';
 import { parseFileToContent } from '../services/fileParsers.js';
 import { maskKey } from '../services/orchestrator.js';
-import { recordFailureRateTick } from '../redis/systemConfig.js';
+import { recordFailureRateTick, isHivemindRuntimeEnabled } from '../redis/systemConfig.js';
 import { isHivemindEnabled, retrieveContext, storeContext, buildContextPrefix } from '../services/hivemind.js';
 import { runEmbed } from '../services/orchestrator.js';
 import { config as appConfig } from '../config.js';
@@ -91,7 +91,14 @@ export async function streamRoutes(fastify) {
     const wallStart = Date.now();
 
     // ── Hivemind: retrieve relevant prior context for this user ────────────
-    if (isHivemindEnabled() && userEmail && prompt) {
+    let hivemindRuntimeOn = true;
+    try {
+      hivemindRuntimeOn = await isHivemindRuntimeEnabled();
+    } catch {
+      // Redis unavailable — fall back to existing behaviour
+      hivemindRuntimeOn = true;
+    }
+    if (hivemindRuntimeOn && isHivemindEnabled() && userEmail && prompt) {
       try {
         const embedResult = await runEmbed({ text: prompt, model: appConfig.hivemindEmbeddingModel });
         const queryVector = embedResult?.embedding?.values;
@@ -313,7 +320,7 @@ export async function streamRoutes(fastify) {
         if (!res.writableEnded) res.end();
 
         // ── Hivemind: store prompt+response for future context (fire-and-forget)
-        if (isHivemindEnabled() && userEmail && prompt && streamedText && streamStatus === 'success') {
+        if (hivemindRuntimeOn && isHivemindEnabled() && userEmail && prompt && streamedText && streamStatus === 'success') {
           const snippet = prompt.slice(0, 200) + '\n---\n' + streamedText.slice(0, 300);
           runEmbed({ text: snippet, model: appConfig.hivemindEmbeddingModel })
             .then(r => {

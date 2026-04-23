@@ -33,6 +33,8 @@ const DEFAULTS = {
   email_tickets_enabled:   '1',
   email_quota_enabled:     '1',
   email_admin_alerts_enabled: '1',
+  // Hivemind runtime gate (1=enabled, 0=disabled). Independent of env-based isHivemindEnabled().
+  hivemind_enabled:        '1',
 };
 
 /**
@@ -106,6 +108,16 @@ export async function isGenerationEnabled() {
 /** Is user registration (OTP request) currently enabled? */
 export async function isRegistrationEnabled() {
   return (await getSystemConfig('registration_enabled')) === '1';
+}
+
+/**
+ * Is hivemind context retrieval/storage enabled at runtime?
+ * Defaults to true when the value is missing so existing deployments are unchanged.
+ * Note: this is an additional gate on top of the env-based isHivemindEnabled().
+ */
+export async function isHivemindRuntimeEnabled() {
+  const val = await getSystemConfig('hivemind_enabled');
+  return val !== '0';
 }
 
 /**

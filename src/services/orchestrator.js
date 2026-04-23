@@ -6,7 +6,7 @@ import { recordSuccess, recordFailure, getBestModel } from '../redis/modelHealth
 import { getFallbackModels, getImageModels } from '../redis/modelConfig.js';
 import { logRequest, logError } from '../db/logger.js';
 import { notifyAdminNoKeys } from './notifications.js';
-import { recordFailureRateTick } from '../redis/systemConfig.js';
+import { recordFailureRateTick, isHivemindRuntimeEnabled } from '../redis/systemConfig.js';
 import { isHivemindEnabled, retrieveContext, storeContext, buildContextPrefix } from './hivemind.js';
 import {
   requestsTotal,
@@ -43,7 +43,14 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
   const wallStart = Date.now();
 
   // ── Hivemind: retrieve relevant prior context for this user ────────────
-  if (isHivemindEnabled() && userEmail && prompt) {
+  let hivemindRuntimeOn = true;
+  try {
+    hivemindRuntimeOn = await isHivemindRuntimeEnabled();
+  } catch {
+    // Redis unavailable — fall back to existing behaviour
+    hivemindRuntimeOn = true;
+  }
+  if (hivemindRuntimeOn && isHivemindEnabled() && userEmail && prompt) {
     try {
       const embedResult = await _embedForHivemind(prompt);
       if (embedResult) {
@@ -143,7 +150,7 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
       const responseText = result.data?.candidates?.[0]?.content?.parts?.[0]?.text;
 
       // ── Hivemind: store prompt+response for future context retrieval ────
-      if (isHivemindEnabled() && userEmail && prompt && responseText) {
+      if (hivemindRuntimeOn && isHivemindEnabled() && userEmail && prompt && responseText) {
         const snippet = prompt.slice(0, 200) + '\n---\n' + responseText.slice(0, 300);
         _embedAndStore(userEmail, snippet).catch(() => {});
       }

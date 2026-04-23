@@ -2361,6 +2361,7 @@ View all current system flags and configuration.
   "maintenance_mode":        false,
   "generation_enabled":      true,
   "registration_enabled":    true,
+  "hivemind_enabled":        true,
   "default_per_min":         60,
   "alert_failure_threshold": 10,
   "alert_queue_threshold":   100,
@@ -2386,6 +2387,7 @@ Update one or more runtime flags. Changes take effect immediately for all new re
   "maintenance_mode":     true,
   "generation_enabled":   false,
   "registration_enabled": false,
+  "hivemind_enabled":     false,
   "default_per_min":      120,
   "max_sessions_user":    2,
   "max_sessions_admin":   5
@@ -2397,6 +2399,7 @@ Update one or more runtime flags. Changes take effect immediately for all new re
 | `maintenance_mode` | boolean | `true` = all non-admin `/v1/*` requests get `503 MAINTENANCE_MODE` |
 | `generation_enabled` | boolean | `false` = generate/stream/batch return `503 GENERATION_DISABLED` for everyone including admins |
 | `registration_enabled` | boolean | `false` = `/auth/login` returns `503 REGISTRATION_DISABLED` |
+| `hivemind_enabled` | boolean | `false` = generation requests skip hivemind context retrieval and storage entirely (goes straight to the AI). Defaults to `true`. Independent additional gate on top of the env-based hivemind config. |
 | `default_per_min` | integer (≥1) | Global per-minute rate limit for all users without a custom override. Busts all user caches immediately. |
 | `alert_failure_threshold` | integer (≥1) | Failures per 5-min window that trigger a high-failure-rate alert email |
 | `alert_queue_threshold` | integer (≥1) | Queue waiting jobs count that triggers a backlog alert email |
