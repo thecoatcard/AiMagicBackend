@@ -56,26 +56,35 @@ export async function getAllSystemConfig() {
 
 /**
  * Set one or more system config values (all values stored as strings).
- * Persists to MongoDB and updates Redis.
+ * Persists ONLY the delta to MongoDB (per-field $set) so concurrent writers
+ * don't stomp on each other's keys, and updates Redis.
  * @param {Record<string, string>} updates
  */
 export async function setSystemConfig(updates) {
   const flat = [];
+  const delta = {};
   for (const [k, v] of Object.entries(updates)) {
-    flat.push(k, String(v));
+    const sv = String(v);
+    flat.push(k, sv);
+    delta[k] = sv;
   }
   if (flat.length > 0) {
     await getRedis().hset(CONFIG_KEY, ...flat);
-    
-    // Persist full state to MongoDB
-    const current = await getAllSystemConfig();
-    await savePersistentConfig('system', current);
+
+    // Persist ONLY the delta to MongoDB. savePersistentConfig already uses
+    // $set semantics, so passing just the changed fields means concurrent
+    // updaters touching different keys won't overwrite each other.
+    await savePersistentConfig('system', delta);
   }
 }
 
 /**
  * Load system configuration from MongoDB into Redis.
  * Called on server startup or during multi-Redis failover.
+ *
+ * Reconciles deletions: any field present in Redis but NOT in the Mongo
+ * doc (and not a DEFAULTS-seeded field) is HDEL'd so stale keys don't
+ * persist forever after a failover or admin removal.
  * @param {import('ioredis').Redis} [client] - optional client to target (defaults to active)
  */
 export async function loadSystemConfigFromDb(client) {
@@ -83,6 +92,18 @@ export async function loadSystemConfigFromDb(client) {
   const doc = await getPersistentConfig('system');
   if (doc) {
     const { _id, updated_at, ...config } = doc;
+
+    // Reconcile: drop Redis fields that are no longer in Mongo
+    // (but never drop DEFAULTS-seeded fields — those are always valid).
+    const redisFields = (await redis.hkeys(CONFIG_KEY)) ?? [];
+    const mongoFields = new Set(Object.keys(config));
+    const toDelete = redisFields.filter(
+      f => !mongoFields.has(f) && !(f in DEFAULTS)
+    );
+    if (toDelete.length > 0) {
+      await redis.hdel(CONFIG_KEY, ...toDelete);
+    }
+
     const flat = [];
     for (const [k, v] of Object.entries(config)) {
       flat.push(k, String(v));
@@ -152,15 +173,8 @@ export async function getMaxSessionsAdmin() {
  */
 export async function getPlanDailyLimit(plan) {
   const key = `plan_limit_${plan}`;
-  const val = await getSystemConfig(key);
-  // Non-empty and not the default means admin has set a custom value
-  if (val !== null && val !== '' && !(key in DEFAULTS)) {
-    const parsed = parseInt(val, 10);
-    if (!isNaN(parsed)) return parsed;
-  }
-  // Also check if it was explicitly stored (even if it matches DEFAULTS)
   const stored = await getRedis().hget(CONFIG_KEY, key);
-  if (stored !== null) {
+  if (stored !== null && stored !== '') {
     const parsed = parseInt(stored, 10);
     if (!isNaN(parsed)) return parsed;
   }

@@ -75,6 +75,10 @@ export async function ticketsRoutes(fastify) {
       reply.status(400);
       return { error: 'Description is required (min 10 chars)', code: 'BAD_REQUEST' };
     }
+    if (!VALID_PRIORITIES.includes(priority)) {
+      reply.status(400);
+      return { error: `priority must be one of: ${VALID_PRIORITIES.join(', ')}`, code: 'INVALID_PRIORITY' };
+    }
 
     let ticket;
     try {

@@ -216,7 +216,7 @@ export async function adminSystemRoutes(fastify) {
 
   // ── POST /v1/admin/system/payment-qr — upload QR code ──────────────────────
   fastify.post('/v1/admin/system/payment-qr', async (request, reply) => {
-    if (!request.isMultipart) {
+    if (!request.isMultipart()) {
       reply.status(400);
       return { error: 'Multipart request required', code: 'NOT_MULTIPART' };
     }

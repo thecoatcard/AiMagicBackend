@@ -1,3 +1,4 @@
+import { randomInt } from 'node:crypto';
 import { getRedis } from '../redis/client.js';
 import { config } from '../config.js';
 
@@ -14,19 +15,36 @@ function attemptsKey(email) {
 }
 
 /**
- * Generate a 6-digit OTP, store it in Redis with TTL, return the OTP.
- * Overwrites any existing OTP for this email (resend case).
+ * Generate a cryptographically random 6-digit OTP value (no Redis side-effects).
  */
-export async function generateOtp(email) {
-  const otp = String(Math.floor(100000 + Math.random() * 900000));
+export function createOtpValue() {
+  return String(randomInt(100000, 1000000));
+}
+
+/**
+ * Persist an OTP for an email in Redis with the configured TTL.
+ * Does NOT reset the attempts counter (preserves lockout across resends).
+ * The attempts counter is given the same TTL so it expires with the OTP window.
+ */
+export async function persistOtp(email, otp) {
   const ttlSeconds = Math.ceil(config.otpTtlMs / 1000);
   const redis = getRedis();
 
-  await redis.pipeline()
-    .set(otpKey(email), otp, 'EX', ttlSeconds)
-    .del(attemptsKey(email))          // reset attempt counter on new OTP
-    .exec();
+  // Set OTP with TTL. Ensure attempts key has a TTL bounded by the OTP window
+  // so attempts naturally expire (instead of growing forever or being reset).
+  await redis.set(otpKey(email), otp, 'EX', ttlSeconds);
+  // EXPIRE is a no-op if the key doesn't exist; harmless if no attempts yet.
+  await redis.expire(attemptsKey(email), ttlSeconds);
+}
 
+/**
+ * Generate a 6-digit OTP, store it in Redis with TTL, return the OTP.
+ * Backward-compatible composition of createOtpValue + persistOtp for callers
+ * that want a single-shot generate-and-persist.
+ */
+export async function generateOtp(email) {
+  const otp = createOtpValue();
+  await persistOtp(email, otp);
   return otp;
 }
 

@@ -37,7 +37,9 @@ export async function batchRoutes(fastify) {
       return queue.add(
         `batch-${batchId}-${i}`,
         { prompt, model, options, requestId, batchId, prompt_index: i, userEmail: request.user?.email },
-        { jobId: requestId }
+        // attempts: 2 — orchestrator already retries internally, so queue-level
+        // retries beyond 2 multiply work without improving success rate.
+        { jobId: requestId, attempts: 2 }
       ).then(job => ({ job_id: job.id, request_id: requestId, prompt_index: i }));
     });
 

@@ -45,4 +45,12 @@ export const config = {
   hivemindTopK: parseInt(process.env.HIVEMIND_TOP_K || '5', 10),
   hivemindEmbeddingModel: process.env.HIVEMIND_EMBEDDING_MODEL || 'gemini-embedding-2-preview',
   hivemindMaxSnippetLen: parseInt(process.env.HIVEMIND_MAX_SNIPPET_LEN || '500', 10),
+  // Cosine similarity threshold for hivemind context retrieval. Snippets
+  // scoring at-or-below this value are dropped before top-K selection.
+  // Clamped to [0, 1]; defaults to 0.3.
+  hivemindSimThreshold: (() => {
+    const raw = Number(process.env.HIVEMIND_SIM_THRESHOLD);
+    const v = Number.isFinite(raw) ? raw : 0.3;
+    return Math.max(0, Math.min(1, v));
+  })(),
 };

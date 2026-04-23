@@ -14,7 +14,7 @@ function hashKey(model) {
 export async function recordSuccess(model, latencyMs) {
   const redis = getRedis();
   const key = hashKey(model);
-  await redis.pipeline()
+  await redis.multi()
     .hincrby(key, 'success', 1)
     .hincrby(key, 'total_latency_ms', Math.round(latencyMs))
     .hset(key, 'last_updated', Date.now())
@@ -32,11 +32,21 @@ export async function recordFailure(model, type) {
   const field = type === '503' ? 'fail_503'
     : type === 'timeout' ? 'fail_timeout'
     : 'fail_other';
-  await redis.pipeline()
+  await redis.multi()
     .hincrby(key, field, 1)
     .hset(key, 'last_updated', Date.now())
     .exec();
+
+  // Invalidate the in-process best-model cache so subsequent callers don't
+  // keep getting routed to a model we just observed degrading. We only
+  // invalidate for "model is degraded" reasons — 429 is a key-level issue
+  // (handled by key cooldown), and 'other' is too generic to act on.
+  if (DEGRADED_REASONS.has(String(type))) {
+    invalidateBestModelCache();
+  }
 }
+
+const DEGRADED_REASONS = new Set(['503', '500', '502', '504', 'timeout', 'no_keys']);
 
 /**
  * Get computed stats for a model.
@@ -125,10 +135,21 @@ export async function getBestModel(candidates) {
   return best;
 }
 
+/**
+ * Clear the in-process best-model cache. Called by recordFailure() when a
+ * model fails for a "degraded" reason so the next caller can re-evaluate
+ * the candidates instead of seeing the just-failed model recommended again.
+ */
+export function invalidateBestModelCache() {
+  _bestModelCache = { key: null, model: null, expiresAt: 0 };
+}
+
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 function healthScore(raw) {
-  if (!raw || Object.keys(raw).length === 0) return 1; // no data → assume healthy
+  // Bayesian smoothing: cold or low-N models score ~0.5, not 1.0,
+  // so we don't over-trust a model with no observed traffic.
+  if (!raw || Object.keys(raw).length === 0) return 0.5;
 
   const success = parseInt(raw.success || '0', 10);
   const fail503 = parseInt(raw.fail_503 || '0', 10);
@@ -136,9 +157,11 @@ function healthScore(raw) {
   const failOther = parseInt(raw.fail_other || '0', 10);
   const total = success + fail503 + failTimeout + failOther;
 
-  if (total === 0) return 1;
+  // Smoothed success rate with a weak Beta(5, 5) prior.
+  const successRate = (success + 5) / (total + 10);
 
-  const successRate = success / total;
+  if (total === 0) return successRate;
+
   const rate503 = fail503 / total;
   const rateTimeout = failTimeout / total;
 
@@ -147,7 +170,7 @@ function healthScore(raw) {
 
 function computeStats(model, raw) {
   if (!raw || Object.keys(raw).length === 0) {
-    return { model, success: 0, fail_503: 0, fail_timeout: 0, fail_other: 0, success_rate: null, avg_latency_ms: null };
+    return { model, success: 0, fail_503: 0, fail_timeout: 0, fail_other: 0, success_rate: null, avg_latency_ms: null, confidence: 'low' };
   }
 
   const success = parseInt(raw.success || '0', 10);
@@ -165,6 +188,7 @@ function computeStats(model, raw) {
     fail_other: failOther,
     success_rate: total > 0 ? +(success / total).toFixed(4) : null,
     avg_latency_ms: success > 0 ? Math.round(totalLatency / success) : null,
+    confidence: total < 5 ? 'low' : 'high',
     last_updated: raw.last_updated ? new Date(parseInt(raw.last_updated, 10)).toISOString() : null,
   };
 }

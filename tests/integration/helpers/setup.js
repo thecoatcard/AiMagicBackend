@@ -87,6 +87,16 @@ const mockRedis = {
     get: vi.fn().mockReturnThis(),
     exec: vi.fn().mockResolvedValue([]),
   })),
+  multi: vi.fn(() => ({
+    set: vi.fn().mockReturnThis(),
+    del: vi.fn().mockReturnThis(),
+    get: vi.fn().mockReturnThis(),
+    hset: vi.fn().mockReturnThis(),
+    hincrby: vi.fn().mockReturnThis(),
+    expire: vi.fn().mockReturnThis(),
+    incr: vi.fn().mockReturnThis(),
+    exec: vi.fn().mockResolvedValue([]),
+  })),
   scanStream: vi.fn(() => {
     const { EventEmitter } = require('events');
     const stream = new EventEmitter();
@@ -275,6 +285,8 @@ vi.mock('../../../src/db/batches.js', () => ({
 
 // Auth mocks
 vi.mock('../../../src/auth/otp.js', () => ({
+  createOtpValue: vi.fn(() => '123456'),
+  persistOtp: vi.fn().mockResolvedValue(undefined),
   generateOtp: vi.fn().mockResolvedValue('123456'),
   verifyOtp: vi.fn(async (email, otp) => {
     if (otp === '123456') return { valid: true };

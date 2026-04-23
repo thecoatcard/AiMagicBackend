@@ -63,8 +63,9 @@ export async function toolsRoutes(fastify) {
       return { error: 'Tool not found', id: request.params.id };
     }
 
-    // Increment download count (fire-and-forget — don't block the response)
-    incrementDownloadCount(tool.id).catch(err => {
+    // Increment download count only on successful delivery branches below
+    // (fire-and-forget — don't block the response). 404/502 paths skip it.
+    const bumpCount = () => incrementDownloadCount(tool.id).catch(err => {
       fastify.log.warn({ err, toolId: tool.id }, '[tools] failed to increment download count');
     });
 
@@ -73,6 +74,7 @@ export async function toolsRoutes(fastify) {
         reply.status(502);
         return { error: 'External URL not configured', code: 'NO_EXTERNAL_URL' };
       }
+      bumpCount();
       return reply.redirect(302, tool.external_url);
     }
 
@@ -96,6 +98,7 @@ export async function toolsRoutes(fastify) {
           }
         });
 
+        bumpCount();
         return reply.send(downloadStream);
       } catch (err) {
         reply.status(404);
@@ -103,6 +106,7 @@ export async function toolsRoutes(fastify) {
       }
     } else if (tool.file_path && existsSync(tool.file_path)) {
       // Stream from disk (Legacy implementation)
+      bumpCount();
       return reply.send(createReadStream(tool.file_path));
     } else {
       reply.status(404);

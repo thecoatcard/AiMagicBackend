@@ -13,6 +13,29 @@ const KEY_REVERSE_MAP = 'gemini_key_reverse'; // Hash: maskedKey -> rawKey (O(1)
 // Score used to permanently disable a key (year 9999)
 const DISABLED_SCORE = 253402300799000;
 
+// Atomic LREM-from-active + ZADD-to-cooldown. Prevents the key from being
+// "lost" if the process crashes between the two ops.
+const COOLDOWN_LUA = `
+  redis.call('LREM', KEYS[1], 0, ARGV[1])
+  redis.call('ZADD', KEYS[2], ARGV[2], ARGV[1])
+  return 1
+`;
+
+// Atomic LREM-from-active + ZADD-with-DISABLED_SCORE-to-cooldown.
+// Disabled keys are stored in the same cooldown ZSET with a far-future score.
+const DISABLE_LUA = `
+  redis.call('LREM', KEYS[1], 0, ARGV[1])
+  redis.call('ZADD', KEYS[2], ARGV[2], ARGV[1])
+  return 1
+`;
+
+// Atomic ZREM-from-cooldown + LPUSH-to-active.
+const ENABLE_LUA = `
+  redis.call('ZREM', KEYS[1], ARGV[1])
+  redis.call('LPUSH', KEYS[2], ARGV[1])
+  return 1
+`;
+
 /**
  * Mask a key for display: first 4 + short hash + last 4.
  * Uses SHA256 to avoid collisions between keys sharing the same prefix/suffix.
@@ -64,7 +87,9 @@ export async function getKey() {
 }
 
 /**
- * Return a key to the front of the active pool (LPUSH).
+ * Return a key to the active pool (LPUSH).
+ * Combined with RPOP in getKey(), this gives round-robin rotation:
+ * the just-used key goes to the head while the next pop takes from the tail.
  * Duplicate-safe: only adds if not already present.
  */
 export async function returnKey(key) {
@@ -89,12 +114,11 @@ export async function returnKey(key) {
 export async function cooldownKey(key, ttlMs, reason = 'unknown') {
   const expireAt = Date.now() + ttlMs;
   const redis = getRedis();
-  await redis.lrem(ACTIVE_LIST, 0, key);
-  await redis.zadd(COOLDOWN_ZSET, expireAt, key);
-  
+  await redis.eval(COOLDOWN_LUA, 2, ACTIVE_LIST, COOLDOWN_ZSET, key, expireAt);
+
   // Sync to MongoDB with reason
   await upsertApiKey(key, { status: 'cooldown', cooldownUntil: new Date(expireAt), reason });
-  
+
   checkPoolLow(redis).catch(() => {});
 }
 
@@ -107,12 +131,11 @@ export async function disableKey(key, reason = 'unknown') {
   const redis = getRedis();
   const rawKey = await resolveRawKey(key);
   if (!rawKey) return; // Key not found in any pool
-  await redis.lrem(ACTIVE_LIST, 0, rawKey);
-  await redis.zadd(COOLDOWN_ZSET, DISABLED_SCORE, rawKey);
-  
+  await redis.eval(DISABLE_LUA, 2, ACTIVE_LIST, COOLDOWN_ZSET, rawKey, DISABLED_SCORE);
+
   // Sync to MongoDB with reason
   await upsertApiKey(rawKey, { status: 'disabled', reason });
-  
+
   checkPoolLow(redis).catch(() => {});
 }
 
@@ -130,9 +153,8 @@ export async function enableKey(key) {
   const redis = getRedis();
   const rawKey = await resolveRawKey(key);
   if (!rawKey) return; // Key not found in any pool
-  await redis.zrem(COOLDOWN_ZSET, rawKey);
-  await redis.lpush(ACTIVE_LIST, rawKey);
-  
+  await redis.eval(ENABLE_LUA, 2, COOLDOWN_ZSET, ACTIVE_LIST, rawKey);
+
   // Sync to MongoDB
   await upsertApiKey(rawKey, { status: 'active' });
 }

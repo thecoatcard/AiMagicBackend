@@ -16,8 +16,9 @@ import { loadSystemConfigFromDb, seedPlanLimitsToRedis, getFailureRateCount, get
 import { loadModelConfigFromDb } from './redis/modelConfig.js';
 import { syncApiKeysWithDb, seedKeysFromEnv, restoreExpiredKeys, getPoolStats } from './redis/keyPool.js';
 import { invalidateUserLimitsCache } from './middleware/rateLimiter.js';
+import { invalidateSession } from './auth/session.js';
 import { writeAuditLog } from './db/auditLog.js';
-import { runDailyRotation, hydrateFromMongoIfNeeded } from './services/dailySnapshot.js';
+import { runDailyRotation, hydrateFromMongoIfNeeded, getYesterdayBoundsIST } from './services/dailySnapshot.js';
 
 const server = buildServer();
 
@@ -235,7 +236,16 @@ async function cleanupExpiredSubscriptions() {
       server.log.info({ count: reverted }, '[Subscriptions] Auto-downgraded expired premium accounts');
       // Invalidate Redis caches for these users
       await Promise.all(emails.map(email => invalidateUserLimitsCache(email).catch(() => {})));
-      
+
+      // Invalidate active sessions so JWTs encoding the stale plan='premium'
+      // can no longer be used. Each call is wrapped so one failure doesn't
+      // stop the loop.
+      await Promise.all(emails.map(email =>
+        invalidateSession(email).catch(err => {
+          server.log.warn({ err, email }, '[Subscriptions] Failed to invalidate session for downgraded user');
+        })
+      ));
+
       // Write to audit log
       writeAuditLog({
         actorEmail: 'system-worker',
@@ -253,24 +263,24 @@ cleanupExpiredSubscriptions();
 // Then run every hour
 setInterval(cleanupExpiredSubscriptions, 60 * 60 * 1000);
 
-// Log Cleanup — delete requests, errors, and snapshots older than 15 days
+// Log Cleanup — delete high-volume request/error logs older than 15 days.
+// FIX-4: `daily_snapshots` is the only long-term historical record and must
+// NOT be purged on the 15-day cycle. Snapshots are tiny; we keep them.
 async function cleanupOldLogs() {
   try {
     const db = await getDb();
     const cutoff = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000);
 
-    const [reqResult, errResult, snapResult] = await Promise.all([
+    const [reqResult, errResult] = await Promise.all([
       db.collection('requests').deleteMany({ created_at: { $lt: cutoff } }),
       db.collection('errors').deleteMany({ timestamp: { $lt: cutoff } }),
-      db.collection('daily_snapshots').deleteMany({ snapshot_at: { $lt: cutoff } }),
     ]);
 
-    const total = (reqResult.deletedCount || 0) + (errResult.deletedCount || 0) + (snapResult.deletedCount || 0);
+    const total = (reqResult.deletedCount || 0) + (errResult.deletedCount || 0);
     if (total > 0) {
       server.log.info({
         requests: reqResult.deletedCount,
         errors: errResult.deletedCount,
-        snapshots: snapResult.deletedCount,
       }, `[LogCleanup] Deleted ${total} documents older than 15 days`);
     }
   } catch (err) {
@@ -289,30 +299,45 @@ try {
   process.exit(1);
 }
 
-function scheduleDailySummary() {
+// FIX-3 / FIX-5: Re-anchor each tick to wall-clock so we don't accumulate
+// drift over weeks/months. computeNextFireTime is the single source of truth
+// for both the first fire and every subsequent reschedule.
+function nextDailySummaryFire() {
   const now = new Date();
   const next8am = new Date(Date.UTC(
     now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 8, 0, 0, 0,
   ));
   if (now >= next8am) next8am.setUTCDate(next8am.getUTCDate() + 1);
-  const msUntilFirst = next8am - now;
+  return next8am;
+}
+
+function scheduleDailySummary() {
+  const msUntilFirst = nextDailySummaryFire() - new Date();
 
   setTimeout(async function tick() {
-    await sendDailySummary();
-    // Schedule the next one in exactly 24h
-    setTimeout(tick, 24 * 60 * 60 * 1000);
+    try {
+      await sendDailySummary();
+    } catch (err) {
+      server.log.error({ err }, '[daily-summary] tick failed');
+    }
+    // Recompute next fire from wall-clock to self-correct any drift.
+    const delay = Math.max(1000, nextDailySummaryFire() - Date.now());
+    setTimeout(tick, delay);
   }, msUntilFirst);
 }
 
 // 12:00 AM IST = 18:30 UTC (IST is UTC+5:30)
-function scheduleDailyRotation() {
+function nextDailyRotationFire() {
   const now = new Date();
   const nextMidnightIST = new Date(Date.UTC(
     now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 18, 30, 0, 0,
   ));
   if (now >= nextMidnightIST) nextMidnightIST.setUTCDate(nextMidnightIST.getUTCDate() + 1);
-  const msUntilFirst = nextMidnightIST - now;
+  return nextMidnightIST;
+}
 
+function scheduleDailyRotation() {
+  const msUntilFirst = nextDailyRotationFire() - new Date();
   const hoursUntil = (msUntilFirst / 3600000).toFixed(1);
   server.log.info(`[DailyRotation] Next run in ${hoursUntil}h (12:00 AM IST)`);
 
@@ -324,18 +349,20 @@ function scheduleDailyRotation() {
     } catch (err) {
       server.log.error({ err }, '[DailyRotation] Failed');
     }
-    // Schedule the next one in exactly 24h
-    setTimeout(tick, 24 * 60 * 60 * 1000);
+    // Recompute next fire from wall-clock to self-correct any drift.
+    const delay = Math.max(1000, nextDailyRotationFire() - Date.now());
+    setTimeout(tick, delay);
   }, msUntilFirst);
 }
 
 async function sendDailySummary() {
   try {
     const db = await getDb();
-    const yesterday = new Date(Date.now() - 86400 * 1000);
+    // FIX-3: true IST calendar-day window for "yesterday" — no rolling 24h.
+    const { startUtc, endUtc } = getYesterdayBoundsIST();
 
     const [stats] = await db.collection('requests').aggregate([
-      { $match: { created_at: { $gte: yesterday } } },
+      { $match: { created_at: { $gte: startUtc, $lt: endUtc } } },
       {
         $group: {
           _id:             null,
@@ -349,7 +376,7 @@ async function sendDailySummary() {
     ]).toArray();
 
     const topModelDoc = await db.collection('requests').aggregate([
-      { $match: { created_at: { $gte: yesterday }, status: 'success' } },
+      { $match: { created_at: { $gte: startUtc, $lt: endUtc }, status: 'success' } },
       { $group: { _id: '$model', count: { $sum: 1 } } },
       { $sort: { count: -1 } },
       { $limit: 1 },

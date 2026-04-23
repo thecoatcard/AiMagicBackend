@@ -9,23 +9,23 @@ import { recordSuccess, recordFailure, getModelStats, listAllModels, getBestMode
 describe('recordSuccess()', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockRedis.pipeline.mockReturnValue({
+    mockRedis.multi.mockReturnValue({
       hincrby: vi.fn().mockReturnThis(),
       hset: vi.fn().mockReturnThis(),
       exec: vi.fn().mockResolvedValue([]),
     });
   });
 
-  it('should call pipeline to record success', async () => {
+  it('should call multi to record success', async () => {
     await recordSuccess('model-a', 150);
-    expect(mockRedis.pipeline).toHaveBeenCalled();
+    expect(mockRedis.multi).toHaveBeenCalled();
   });
 });
 
 describe('recordFailure()', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockRedis.pipeline.mockReturnValue({
+    mockRedis.multi.mockReturnValue({
       hincrby: vi.fn().mockReturnThis(),
       hset: vi.fn().mockReturnThis(),
       exec: vi.fn().mockResolvedValue([]),
@@ -34,12 +34,12 @@ describe('recordFailure()', () => {
 
   it('should record 503 failure', async () => {
     await recordFailure('model-a', '503');
-    expect(mockRedis.pipeline).toHaveBeenCalled();
+    expect(mockRedis.multi).toHaveBeenCalled();
   });
 
   it('should record timeout failure', async () => {
     await recordFailure('model-a', 'timeout');
-    expect(mockRedis.pipeline).toHaveBeenCalled();
+    expect(mockRedis.multi).toHaveBeenCalled();
   });
 });
 

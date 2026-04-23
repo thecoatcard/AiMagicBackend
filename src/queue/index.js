@@ -21,15 +21,6 @@ export function getQueue() {
   if (!_queue) {
     _queue = new Queue(QUEUE_NAME, {
       connection: makeRedisConnection(),
-      settings: {
-        backoffStrategies: {
-          jitter: (attemptsMade) => {
-            const delay = Math.pow(2, attemptsMade - 1) * 1000;
-            const jitter = Math.floor(Math.random() * 1000);
-            return delay + jitter;
-          }
-        }
-      },
       defaultJobOptions: {
         attempts: config.maxRetries,
         backoff: { type: 'jitter' },

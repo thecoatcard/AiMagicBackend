@@ -8,6 +8,9 @@ const LIMITS_CACHE_TTL_S  = 300; // 5-minute cache for user rate-limit data
 
 // Lua script: atomically check limit BEFORE incrementing.
 // Returns [newCount, ttl]. If limit would be exceeded, returns [-1, ttl] without incrementing.
+// Re-applies EXPIRE whenever the key has no TTL (TTL == -1) — guards against
+// keys that exist without a TTL (manual ops, prior crash) which would otherwise
+// permanently lock out the user.
 const RATE_LIMIT_LUA = `
   local key = KEYS[1]
   local limit = tonumber(ARGV[1])
@@ -19,11 +22,12 @@ const RATE_LIMIT_LUA = `
     return {-1, t > 0 and t or ttl_s}
   end
   local newVal = redis.call('INCRBY', key, incr)
-  if newVal == incr then
-    redis.call('EXPIRE', key, ttl_s)
-  end
   local t = redis.call('TTL', key)
-  return {newVal, t > 0 and t or ttl_s}
+  if t < 0 then
+    redis.call('EXPIRE', key, ttl_s)
+    t = ttl_s
+  end
+  return {newVal, t}
 `;
 
 /**
@@ -65,7 +69,9 @@ export async function checkUserRateLimit(request, reply) {
   const [dayCount, dayTtl] = await redis.eval(RATE_LIMIT_LUA, 1, dayKey, maxPerDay, 86400, 1);
 
   if (dayCount === -1) {
-    notifyQuotaWarning(email, { used: maxPerDay, limit: maxPerDay, resetInSeconds: dayTtl });
+    // Don't re-fire the quota notification — the 80%-tier warning already
+    // fired on the request that crossed the threshold. Blocked requests
+    // just return 429.
     reply.status(429).send({
       error:            `Daily quota exceeded: max ${maxPerDay} requests per day (${cached.plan ?? 'free'} plan)`,
       code:             'DAILY_LIMIT_EXCEEDED',
@@ -118,7 +124,8 @@ export async function checkBatchRateLimit(request, reply) {
   const [dayCount, dayTtl] = await redis.eval(RATE_LIMIT_LUA, 1, dayKey, maxPerDay, 86400, count);
 
   if (dayCount === -1) {
-    notifyQuotaWarning(email, { used: maxPerDay, limit: maxPerDay, resetInSeconds: dayTtl });
+    // Don't re-fire the quota notification — the 80%-tier warning already
+    // fired on the request that crossed the threshold.
     reply.status(429).send({
       error:            `Daily quota exceeded: max ${maxPerDay} requests per day (${cached.plan ?? 'free'} plan)`,
       code:             'DAILY_LIMIT_EXCEEDED',
@@ -155,6 +162,36 @@ export async function getDailyUsage(email) {
  */
 export async function invalidateUserLimitsCache(email) {
   await getRedis().del(`user_limits_cache:${email}`);
+}
+
+// Lua: atomically DECRBY both per-min and per-day counters, flooring at 0.
+// Used to credit back quota when a batch job terminally fails — otherwise the
+// user is charged for upstream failures with no compensation.
+const CREDIT_BACK_LUA = `
+  local function dec(key, n)
+    local v = redis.call('DECRBY', key, n)
+    if v < 0 then redis.call('SET', key, 0) end
+  end
+  dec(KEYS[1], tonumber(ARGV[1]))
+  dec(KEYS[2], tonumber(ARGV[1]))
+  return 1
+`;
+
+/**
+ * Credit back `count` units of quota to a user (per-min AND per-day counters).
+ * Floors at 0 to avoid negative counters. No-op on Redis errors — the worst
+ * case is the user is charged for a failed batch job, which matches today's
+ * (buggy) behaviour and is non-critical.
+ */
+export async function creditBackBatchQuota(email, count = 1) {
+  if (!email || !Number.isFinite(count) || count <= 0) return;
+  try {
+    const minKey = `rate:${email}:min`;
+    const dayKey = `rate:${email}:day`;
+    await getRedis().eval(CREDIT_BACK_LUA, 2, minKey, dayKey, count);
+  } catch {
+    // Non-critical — Redis outage shouldn't break worker failure handling
+  }
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────────

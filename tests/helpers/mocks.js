@@ -48,6 +48,18 @@ export function createMockRedis() {
     exec: vi.fn().mockResolvedValue([]),
   };
 
+  const mockMulti = {
+    set: vi.fn().mockReturnThis(),
+    del: vi.fn().mockReturnThis(),
+    get: vi.fn().mockReturnThis(),
+    hset: vi.fn().mockReturnThis(),
+    hincrby: vi.fn().mockReturnThis(),
+    hgetall: vi.fn().mockReturnThis(),
+    expire: vi.fn().mockReturnThis(),
+    incr: vi.fn().mockReturnThis(),
+    exec: vi.fn().mockResolvedValue([]),
+  };
+
   return {
     get: vi.fn().mockResolvedValue(null),
     set: vi.fn().mockResolvedValue('OK'),
@@ -76,6 +88,7 @@ export function createMockRedis() {
     unlink: vi.fn().mockResolvedValue(0),
     ping: vi.fn().mockResolvedValue('PONG'),
     pipeline: vi.fn(() => mockPipeline),
+    multi: vi.fn(() => mockMulti),
     scanStream: vi.fn(() => {
       const { EventEmitter } = require('events');
       const stream = new EventEmitter();
@@ -84,6 +97,7 @@ export function createMockRedis() {
     }),
     quit: vi.fn().mockResolvedValue('OK'),
     _pipeline: mockPipeline,
+    _multi: mockMulti,
   };
 }
 

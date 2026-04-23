@@ -14,7 +14,7 @@ export async function adminToolsRoutes(fastify) {
   fastify.post('/v1/admin/tools', async (request, reply) => {
     let toolData;
 
-    if (request.isMultipart) {
+    if (request.isMultipart()) {
       // ── Multipart upload path ──
       const parts = request.parts();
       const fields = {};
@@ -61,12 +61,26 @@ export async function adminToolsRoutes(fastify) {
         return { error: 'name and description are required', code: 'MISSING_FIELDS' };
       }
 
+      // Parse tags BEFORE attempting createTool so a malformed JSON payload
+      // doesn't leave the uploaded blob orphaned in GridFS.
+      let parsedTags = [];
+      if (fields.tags) {
+        try {
+          parsedTags = JSON.parse(fields.tags);
+        } catch {
+          const bucket = await getToolsBucket();
+          bucket.delete(savedFileId).catch(() => {});
+          reply.status(400);
+          return { error: 'tags must be valid JSON', code: 'INVALID_TAGS' };
+        }
+      }
+
       toolData = {
         name:        fields.name,
         description: fields.description,
         icon:        fields.icon        ?? null,
         version:     fields.version     ?? null,
-        tags:        fields.tags ? JSON.parse(fields.tags) : [],
+        tags:        parsedTags,
         type:        'zip',
         file_id:     savedFileId.toString(),
         file_name:   savedFileName,
@@ -102,6 +116,14 @@ export async function adminToolsRoutes(fastify) {
     try {
       tool = await createTool(toolData);
     } catch (err) {
+      // Any post-upload failure must clean up the GridFS blob to prevent
+      // orphan files (duplicate-name 11000, validation, transient DB error, etc.)
+      if (toolData.file_id) {
+        try {
+          const bucket = await getToolsBucket();
+          await bucket.delete(savedFileId);
+        } catch {}
+      }
       if (err.code === 11000) {
         reply.status(409);
         return { error: 'A tool with that name already exists', code: 'DUPLICATE_NAME' };

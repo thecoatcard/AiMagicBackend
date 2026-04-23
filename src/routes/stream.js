@@ -14,6 +14,7 @@ import { recordFailureRateTick, isHivemindRuntimeEnabled } from '../redis/system
 import { isHivemindEnabled, retrieveContext, storeContext, buildContextPrefix } from '../services/hivemind.js';
 import { runEmbed } from '../services/orchestrator.js';
 import { config as appConfig } from '../config.js';
+import { getRedis } from '../redis/client.js';
 import {
   requestsTotal,
   requestDuration,
@@ -21,6 +22,7 @@ import {
   keyCooldownsTotal,
   model503Total,
   modelTimeoutsTotal,
+  hivemindEmbeddingsTotal,
 } from '../metrics/index.js';
 
 export async function streamRoutes(fastify) {
@@ -100,7 +102,22 @@ export async function streamRoutes(fastify) {
     }
     if (hivemindRuntimeOn && isHivemindEnabled() && userEmail && prompt) {
       try {
-        const embedResult = await runEmbed({ text: prompt, model: appConfig.hivemindEmbeddingModel });
+        // Time-box the embedding call so a slow / retrying embed pipeline
+        // never blocks SSE response start for more than 1.5s. If it doesn't
+        // finish in time, skip hivemind retrieval and proceed to stream.
+        const embedPromise = runEmbed({ text: prompt, model: appConfig.hivemindEmbeddingModel });
+        let timedOut = false;
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => { timedOut = true; reject(new Error('embed_timeout')); }, 1500)
+        );
+        const embedResult = await Promise.race([embedPromise, timeoutPromise]).catch(() => null);
+        if (timedOut) {
+          try { hivemindEmbeddingsTotal.inc({ operation: 'retrieve', status: 'timeout' }); } catch { /* metrics outage */ }
+        } else if (embedResult && !embedResult.error) {
+          try { hivemindEmbeddingsTotal.inc({ operation: 'retrieve', status: 'success' }); } catch { /* metrics outage */ }
+        } else {
+          try { hivemindEmbeddingsTotal.inc({ operation: 'retrieve', status: 'failure' }); } catch { /* metrics outage */ }
+        }
         const queryVector = embedResult?.embedding?.values;
         if (queryVector) {
           const snippets = await retrieveContext(userEmail, queryVector);
@@ -120,16 +137,34 @@ export async function streamRoutes(fastify) {
     // ── Model selection — mirrors orchestrator.js logic ──────────────────────
     const fallbackModels = await getFallbackModels();
     let currentModel = model ?? await getBestModel(fallbackModels);
+
+    // Short-circuit: if admin removed all fallback models AND caller omitted
+    // `model`, send a clean 503 instead of looping with a null model.
+    if (!currentModel) {
+      reply.status(503);
+      return { error: 'No models available', code: 'NO_MODELS', request_id: requestId };
+    }
+
     let fallbackIndex = fallbackModels.indexOf(currentModel); // -1 = custom model
 
     // Shared retry tracking (for logRequest parity with /v1/generate)
     let retries = 0;
     let lastKeyMasked = null;
     let model429Count = 0; // Consecutive 429 tracking for currentModel
+    // Track the previous attempt's bodyStream so we can guarantee teardown
+    // before each new upstream call regardless of which branch advanced us.
+    let activeBodyStream = null;
     // ─────────────────────────────────────────────────────────────────────────
 
     for (let attempt = 0; attempt < config.maxRetries; attempt++) {
       if (attempt > 0) retries++;
+
+      // Always destroy any stream left over from the previous iteration —
+      // prevents socket leaks if a branch above forgot to clean it up.
+      if (activeBodyStream) {
+        try { activeBodyStream.removeAllListeners(); activeBodyStream.destroy(); } catch { /* noop */ }
+        activeBodyStream = null;
+      }
 
       const key = await getKey();
       if (!key) {
@@ -144,6 +179,8 @@ export async function streamRoutes(fastify) {
       let result;
       try {
         result = await streamGenerateContent(key, currentModel, prompt ?? '', options);
+        // Track for guaranteed teardown next iteration / on success.
+        activeBodyStream = result.bodyStream ?? null;
         // Prevent "Unhandled 'error' event" crash if the stream is destroyed or aborted
         result.bodyStream?.on('error', (err) => {
           fastify.log.warn({ err }, '[stream] bodyStream error');
@@ -178,7 +215,6 @@ export async function streamRoutes(fastify) {
       }
 
       if (result.status === 429) {
-        result.bodyStream.destroy();
         model429Count++;
         recordKeyFailure(lastKeyMasked).catch(() => {});
         if (model429Count < 3) {
@@ -186,7 +222,7 @@ export async function streamRoutes(fastify) {
           keyCooldownsTotal.inc();
           recordFailureRateTick().catch(() => {});
           await cooldownKey(key, config.cooldownMs * 2, '429_rate_limit');
-          continue; // same model, rotate key
+          continue; // same model, rotate key (loop-top will tear down activeBodyStream)
         }
         logError({ type: '429_EXHAUSTED', model: currentModel, key_masked: lastKeyMasked, message: 'Rate limit hit 3 times, switching model' });
         await cooldownKey(key, config.cooldownMs * 2, '429_exhausted'); // Still cooldown the key that triggered it
@@ -195,17 +231,19 @@ export async function streamRoutes(fastify) {
       // Handle 5xx and explicit 4xx switches (400, 404)
       if ([500, 502, 503, 504, 400, 404].includes(result.status) || (result.status === 429 && model429Count >= 3)) {
         if (result.status !== 429) {
-          result.bodyStream?.destroy();
+          // For non-429 paths the key was not yet returned and the failure
+          // not yet recorded — do so here. (429 path already handled both above,
+          // so we MUST NOT repeat them or we'd double-cooldown / double-count.)
           await returnKey(key);
+          recordKeyFailure(lastKeyMasked).catch(() => {});
         }
-        recordKeyFailure(lastKeyMasked).catch(() => {});
-        
+
         const type = String(result.status);
         await recordFailure(currentModel, result.status >= 500 ? '503' : 'other');
         logError({ type, model: currentModel, key_masked: lastKeyMasked });
         if (result.status === 503) model503Total.inc({ model: currentModel });
         recordFailureRateTick().catch(() => {});
-        
+
         const remaining = fallbackIndex === -1
           ? fallbackModels
           : fallbackModels.slice(fallbackIndex + 1);
@@ -218,7 +256,6 @@ export async function streamRoutes(fastify) {
       }
 
       if (result.status === 401 || result.status === 403) {
-        result.bodyStream.destroy();
         await disableKey(key, 'key_invalid');
         recordKeyFailure(lastKeyMasked).catch(() => {});
         logError({ type: 'key_invalid', model: currentModel, key_masked: lastKeyMasked, message: `Status ${result.status}: API Key is invalid` });
@@ -227,7 +264,8 @@ export async function streamRoutes(fastify) {
       }
 
       if (result.status !== 200) {
-        result.bodyStream.destroy();
+        try { activeBodyStream?.removeAllListeners(); activeBodyStream?.destroy(); } catch { /* noop */ }
+        activeBodyStream = null;
         await returnKey(key);
         await recordFailure(currentModel, 'other');
         logError({ type: String(result.status), model: currentModel, key_masked: lastKeyMasked, message: `Streaming error status: ${result.status}` });
@@ -238,6 +276,9 @@ export async function streamRoutes(fastify) {
       }
 
       // ── Success — stream back to client ────────────────────────────────────
+      // Hand ownership of bodyStream to the streaming loop below; the loop-top
+      // teardown guard no longer applies past this point.
+      activeBodyStream = null;
       await returnKey(key);
       await recordSuccess(currentModel, Date.now() - wallStart);
       recordKeySuccess(lastKeyMasked).catch(() => {});
@@ -255,23 +296,29 @@ export async function streamRoutes(fastify) {
       res.socket?.setNoDelay?.(true);
 
       // CORS — @fastify/cors onSend hook is skipped after hijack(), set manually.
+      // Only echo the Origin if it's in the allow-list; otherwise omit the
+      // header entirely (never fall back to a hard-coded origin, since that
+      // would let an unrelated site receive credentialed responses).
       const requestOrigin = request.headers.origin;
       const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:3001')
         .split(',').map(o => o.trim()).filter(Boolean);
-      const corsOrigin = allowedOrigins.includes(requestOrigin)
+      const corsOrigin = requestOrigin && allowedOrigins.includes(requestOrigin)
         ? requestOrigin
-        : (allowedOrigins[0] || 'http://localhost:3001');
+        : null;
 
-      res.writeHead(200, {
+      const headers = {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache, no-transform',
         'Connection': 'keep-alive',
         'X-Accel-Buffering': 'no',
         'X-Request-Id': requestId,
         'X-Model-Used': currentModel,
-        'Access-Control-Allow-Origin': corsOrigin,
-        'Access-Control-Allow-Credentials': 'true',
-      });
+      };
+      if (corsOrigin) {
+        headers['Access-Control-Allow-Origin'] = corsOrigin;
+        headers['Access-Control-Allow-Credentials'] = 'true';
+      }
+      res.writeHead(200, headers);
 
       // Flush headers to client immediately — headers are lazy in Node.js HTTP.
       res.write(': ok\n\n');
@@ -322,12 +369,28 @@ export async function streamRoutes(fastify) {
         // ── Hivemind: store prompt+response for future context (fire-and-forget)
         if (hivemindRuntimeOn && isHivemindEnabled() && userEmail && prompt && streamedText && streamStatus === 'success') {
           const snippet = prompt.slice(0, 200) + '\n---\n' + streamedText.slice(0, 300);
-          runEmbed({ text: snippet, model: appConfig.hivemindEmbeddingModel })
-            .then(r => {
+          (async () => {
+            // Idempotency guard: BullMQ retries / client retries may resubmit
+            // the same logical request. SET-NX on requestId prevents duplicate
+            // hivemind entries with different UUIDs but identical content.
+            try {
+              const guardKey = `hm:store_guard:${requestId}`;
+              const acquired = await getRedis().set(guardKey, '1', 'EX', 600, 'NX');
+              if (acquired !== 'OK') return; // already stored for this requestId
+            } catch { /* Redis unreachable — degrade gracefully and proceed */ }
+            try {
+              const r = await runEmbed({ text: snippet, model: appConfig.hivemindEmbeddingModel });
+              if (r?.error) {
+                try { hivemindEmbeddingsTotal.inc({ operation: 'store', status: 'failure' }); } catch { /* metrics outage */ }
+                return;
+              }
+              try { hivemindEmbeddingsTotal.inc({ operation: 'store', status: 'success' }); } catch { /* metrics outage */ }
               const vector = r?.embedding?.values;
-              if (vector) return storeContext(userEmail, snippet, vector);
-            })
-            .catch(() => {});
+              if (vector) await storeContext(userEmail, snippet, vector);
+            } catch {
+              try { hivemindEmbeddingsTotal.inc({ operation: 'store', status: 'failure' }); } catch { /* metrics outage */ }
+            }
+          })();
         }
 
         // Log to MongoDB so /v1/usage and /v1/logs include stream requests —
@@ -348,6 +411,12 @@ export async function streamRoutes(fastify) {
     }
 
     // All retries exhausted
+    // Final teardown: any stream from the last attempt that broke out of the
+    // loop (e.g. via `if (!currentModel) break;`) must not be left dangling.
+    if (activeBodyStream) {
+      try { activeBodyStream.removeAllListeners(); activeBodyStream.destroy(); } catch { /* noop */ }
+      activeBodyStream = null;
+    }
     logRequest({ request_id: requestId, model: currentModel, api_key_masked: lastKeyMasked, latency_ms: 0, status: 'exhausted', retries, prompt_length: promptLength, user_email: userEmail });
     requestsTotal.inc({ model: currentModel ?? 'unknown', status: 'exhausted' });
     reply.status(503);

@@ -259,14 +259,18 @@ export async function getUserStats() {
 /**
  * Bulk update a set of users.
  * @param {string[]} emails
- * @param {object}  update  - fields to $set (e.g. { status: 'blocked' })
+ * @param {object}   update          - fields to $set (e.g. { status: 'blocked' })
+ * @param {object|null} [unset=null] - fields to $unset (e.g. { 'limits.max_requests_per_day': '' })
  * @returns {{ matched: number, modified: number }}
  */
-export async function bulkUpdateUsers(emails, update) {
+export async function bulkUpdateUsers(emails, update, unset = null) {
   const db = await getDb();
+  const op = {};
+  if (update && Object.keys(update).length > 0) op.$set = update;
+  if (unset && Object.keys(unset).length > 0)   op.$unset = unset;
   const result = await db.collection('users').updateMany(
     { email: { $in: emails } },
-    { $set: update }
+    op
   );
   return { matched: result.matchedCount, modified: result.modifiedCount };
 }

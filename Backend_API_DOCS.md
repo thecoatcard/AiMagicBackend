@@ -369,6 +369,7 @@ Supports **system instructions**, **conversation history**, **multimodal images*
 |---|---|---|---|
 | `prompt` | string | ❌ * | The user's input text |
 | `images` | array | ❌ * | Image parts (see below). Required if no prompt |
+| `files` | array | ❌ | Document parts (PDF, Excel, CSV). Max 5 per request |
 | `model` | string | ❌ | Override model. Defaults to best available |
 | `temperature` | number (0–2) | ❌ | Creativity. Default: 1 |
 | `maxOutputTokens` | integer | ❌ | Max response length. Default: 8192 |
@@ -377,6 +378,9 @@ Supports **system instructions**, **conversation history**, **multimodal images*
 | `thinkingBudget` | integer (0–24576) | ❌ | Token budget for model reasoning. `0` disables thinking |
 
 > \* At least one of `prompt` or `images` must be provided.
+>
+> `files[]` accepts base64-encoded PDF, Excel (`.xlsx`/`.xls`), or CSV documents.
+> Each entry must include `mimeType`, `data` (base64), and `name`. Maximum **5 files** per request.
 
 ---
 
@@ -617,7 +621,7 @@ For batch requests (array input), the response contains `embeddings` (array of e
 
 Same as `/v1/generate` but the response is streamed as **Server-Sent Events (SSE)**.
 
-Supports all the same fields: `systemInstruction`, `history`, `images`, `thinkingBudget`, `model`, `temperature`, `maxOutputTokens`.
+Supports all the same fields: `systemInstruction`, `history`, `images`, `files`, `thinkingBudget`, `model`, `temperature`, `maxOutputTokens`. The `files[]` array accepts up to 5 base64-encoded PDF/Excel/CSV documents (same shape as `/v1/generate`).
 
 **Authentication required. Rate-limited.**
 
@@ -1340,7 +1344,7 @@ List all tools. Regular users see only **active** tools. Admins and owners see a
 ```json
 {
   "total": 6,
-  "tools": [
+  "items": [
     {
       "id":             "64f1a2b3c4d5e6f7a8b9c0d1",
       "name":           "CSV Formatter",
@@ -1621,7 +1625,7 @@ Paginated request history.
     {
       "request_id":     "a1b2c3d4-...",
       "model":          "gemini-2.5-flash",
-      "api_key_masked": "AIza****abcd",
+      "api_key_masked": "AIza…a3f9…wxyz",
       "user_email":     "user@example.com",
       "latency_ms":     842,
       "status":         "success",
@@ -1700,7 +1704,7 @@ Paginated error log.
     {
       "type":       "429",
       "model":      "gemini-2.5-flash",
-      "key_masked": "AIza****abcd",
+      "key_masked": "AIza…a3f9…wxyz",
       "timestamp":  "2025-06-10T14:20:05.000Z"
     }
   ]
@@ -1830,7 +1834,7 @@ Error breakdown by type and model, with the 10 most recent errors.
   "by_type":  { "429": 45, "503": 12, "timeout": 8, "other": 3 },
   "by_model": { "gemini-2.5-flash": 50, "gemini-2.5-pro": 18 },
   "recent": [
-    { "type": "429", "model": "gemini-2.5-flash", "key_masked": "AIza****abcd", "timestamp": "..." }
+    { "type": "429", "model": "gemini-2.5-flash", "key_masked": "AIza…a3f9…wxyz", "timestamp": "..." }
   ]
 }
 ```
@@ -1851,7 +1855,7 @@ List all keys and their statuses.
 ```json
 {
   "active": [
-    { "key": "AIza****wxyz", "status": "active" }
+    { "key": "AIza…a3f9…wxyz", "status": "active" }
   ],
   "cooldown": [
     { "key": "AIzc****efgh", "status": "cooldown", "cooldownRemainingMs": 45000 },
@@ -1895,8 +1899,8 @@ Add one or more API keys to the pool.
 ```json
 {
   "results": [
-    { "key": "AIza****...", "added": true },
-    { "key": "AIza****...", "added": false, "reason": "already_active" }
+    { "key": "AIza…a3f9…wxyz", "added": true },
+    { "key": "AIza…b7c2…mnop", "added": false, "reason": "already_active" }
   ]
 }
 ```
@@ -1913,7 +1917,7 @@ Move a cooled-down or disabled key back to active.
 
 **Response `200`:**
 ```json
-{ "status": "enabled", "key": "AIza****abcd" }
+{ "status": "enabled", "key": "AIza…a3f9…wxyz" }
 ```
 
 ---
@@ -1926,7 +1930,7 @@ Permanently disable a key.
 
 **Response `200`:**
 ```json
-{ "status": "disabled", "key": "AIza****abcd" }
+{ "status": "disabled", "key": "AIza…a3f9…wxyz" }
 ```
 
 ---
@@ -1946,8 +1950,8 @@ Enable multiple keys in one request.
 ```json
 {
   "results": [
-    { "key": "AIza****abcd", "status": "enabled" },
-    { "key": "AIza****efgh", "status": "enabled" }
+    { "key": "AIza…a3f9…wxyz", "status": "enabled" },
+    { "key": "AIza…b7c2…mnop", "status": "enabled" }
   ]
 }
 ```
@@ -1969,8 +1973,8 @@ Disable multiple keys in one request.
 ```json
 {
   "results": [
-    { "key": "AIza****abcd", "status": "disabled" },
-    { "key": "AIza****efgh", "status": "disabled" }
+    { "key": "AIza…a3f9…wxyz", "status": "disabled" },
+    { "key": "AIza…b7c2…mnop", "status": "disabled" }
   ]
 }
 ```
@@ -1997,12 +2001,12 @@ Usage statistics for a specific key (queried by masked key string).
 
 **Authentication required. Owner only.**
 
-**`:key`** = masked key, e.g. `AIza****abcd` (URL-encode the `*`: `AIza%2A%2A%2A%2Aabcd`)
+**`:key`** = masked key, e.g. `AIza…a3f9…wxyz` (URL-encode before use: `encodeURIComponent(key)`)
 
 **Response `200`:**
 ```json
 {
-  "key":            "AIza****abcd",
+  "key":            "AIza…a3f9…wxyz",
   "total_requests": 1500,
   "success_count":  1480,
   "failure_count":  20,
@@ -2574,7 +2578,7 @@ Upload a QR code image for manual payments.
 
 **Authentication required. Owner only.**
 
-**Request:** `multipart/form-data` with an image file (JPG, JPEG, PNG, or WebP). Stored in GridFS.
+**Request:** `multipart/form-data` with a single file field named **`file`** (JPG, JPEG, PNG, or WebP). Stored in GridFS.
 
 **Response `200`:**
 ```json
@@ -2823,8 +2827,8 @@ Full system health snapshot — MongoDB, Redis, key pool, queue, latency metrics
     "paused":    0
   },
   "latency": {
-    "queue_wait":  { "p50": 12, "p95": 45, "p99": 120, "mean": 18 },
-    "generation":  { "p50": 650, "p95": 2100, "p99": 4500, "mean": 780 }
+    "queue_wait":  { "avg": 18, "p95": 45, "count": 4823 },
+    "generation":  { "avg": 780, "p95": 2100, "count": 4820 }
   },
   "failure_rate": {
     "last_5_min":      3,

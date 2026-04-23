@@ -1,4 +1,4 @@
-import { generateOtp, verifyOtp } from '../auth/otp.js';
+import { createOtpValue, persistOtp, verifyOtp } from '../auth/otp.js';
 import { createSession, invalidateSession } from '../auth/session.js';
 import { sendEmail } from '../services/email.js';
 // Removed: import { otpTemplate } from '../services/emailTemplates.js';
@@ -9,6 +9,45 @@ import { getOrCreateUser } from '../db/users.js';
 import { config } from '../config.js';
 import { isEmailAllowed } from '../db/whitelist.js';
 import { isRegistrationEnabled } from '../redis/systemConfig.js';
+import { getRedis } from '../redis/client.js';
+
+/**
+ * Redis-backed throttle. Increments key and sets TTL on first hit.
+ * Returns true if the request is allowed, false if the limit is exceeded.
+ * Fails open (returns true) if Redis is unavailable.
+ */
+async function throttle(key, limit, windowSeconds, log) {
+  try {
+    const redis = getRedis();
+    const count = await redis.incr(key);
+    if (count === 1) {
+      await redis.expire(key, windowSeconds);
+    }
+    return count <= limit;
+  } catch (err) {
+    log?.warn({ err, key }, '[auth] throttle redis error — failing open');
+    return true;
+  }
+}
+
+async function authThrottlePreHandler(request, reply, scope, ipLimit, ipWindow, emailLimit, emailWindow) {
+  const ip = request.ip || 'unknown';
+  const email = (request.body?.email || '').toLowerCase();
+
+  const ipOk = await throttle(`auth_throttle:${scope}:ip:${ip}`, ipLimit, ipWindow, request.log);
+  if (!ipOk) {
+    reply.status(429);
+    return reply.send({ error: 'Too many requests from this IP. Please try again later.', code: 'RATE_LIMITED' });
+  }
+
+  if (email) {
+    const emailOk = await throttle(`auth_throttle:${scope}:email:${email}`, emailLimit, emailWindow, request.log);
+    if (!emailOk) {
+      reply.status(429);
+      return reply.send({ error: 'Too many requests for this email. Please try again later.', code: 'RATE_LIMITED' });
+    }
+  }
+}
 
 export async function authRoutes(fastify) {
   // ── Step 1: Request OTP ──────────────────────────────────────────────────
@@ -22,6 +61,9 @@ export async function authRoutes(fastify) {
         },
       },
     },
+    preHandler: (request, reply) =>
+      // 5 requests per IP per minute, 3 OTPs per email per 10 minutes
+      authThrottlePreHandler(request, reply, 'login', 5, 60, 3, 600),
   }, async (request, reply) => {
     const { email } = request.body;
 
@@ -39,16 +81,19 @@ export async function authRoutes(fastify) {
       return { error: 'This email address is not authorised to access this service.', code: 'NOT_WHITELISTED' };
     }
 
-    const otp = await generateOtp(email);
+    // Generate OTP value first; only persist to Redis after email send succeeds.
+    const otp = createOtpValue();
 
     try {
       await sendEmail(email, 'otp', { otp });
     } catch (err) {
-
       fastify.log.error({ err }, '[auth] failed to send OTP email');
       reply.status(502);
       return { error: 'Failed to send OTP email', code: 'EMAIL_ERROR' };
     }
+
+    // Email succeeded → persist OTP to Redis.
+    await persistOtp(email, otp);
 
     return { message: 'OTP sent to your email. It expires in 10 minutes.' };
   });
@@ -65,6 +110,9 @@ export async function authRoutes(fastify) {
         },
       },
     },
+    preHandler: (request, reply) =>
+      // 10 attempts per IP per minute, 10 attempts per email per 10 minutes
+      authThrottlePreHandler(request, reply, 'verify', 10, 60, 10, 600),
   }, async (request, reply) => {
     const { email, otp } = request.body;
 

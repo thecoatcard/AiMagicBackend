@@ -45,7 +45,8 @@ function userKeyPattern(userEmail) {
   return `hm:${userEmail}:*`;
 }
 function entryKey(userEmail) {
-  return `hm:${userEmail}:${randomUUID().slice(0, 8)}`;
+  // Full UUID (not truncated) — eliminates collision risk for high-volume users
+  return `hm:${userEmail}:${randomUUID()}`;
 }
 
 /**
@@ -121,14 +122,14 @@ export async function retrieveContext(userEmail, queryVector) {
       score: cosineSimilarity(queryVector, e.v),
     }));
 
-    // Sort descending by similarity, take top-K
-    scored.sort((a, b) => b.score - a.score);
-    const topK = scored.slice(0, config.hivemindTopK);
-
-    // Filter out low-relevance results (threshold: 0.3)
-    return topK
-      .filter(s => s.score > 0.3)
-      .map(s => s.text);
+    // Order: filter (drop low-relevance) → sort desc → slice top-K.
+    // Filtering before sort/slice prevents weak matches from squeezing out
+    // strong-but-late entries when the user has more than topK snippets.
+    // Fallback to 0.3 if config doesn't define the threshold (e.g. test mocks).
+    const threshold = config.hivemindSimThreshold ?? 0.3;
+    const filtered = scored.filter(s => s.score > threshold);
+    filtered.sort((a, b) => b.score - a.score);
+    return filtered.slice(0, config.hivemindTopK).map(s => s.text);
   } catch (err) {
     console.warn('[Hivemind] retrieveContext error:', err.message);
     return [];

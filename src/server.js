@@ -62,13 +62,16 @@ export function buildServer() {
   // Public routes — no auth required
   fastify.register(healthRoutes);
   fastify.register(authRoutes);
-  fastify.register(systemRoutes);
 
   // Protected routes — all /v1/* require a valid JWT
   fastify.register(async (instance) => {
     instance.addHook('preHandler', authenticate);
     // Maintenance mode check runs after auth so admins can bypass it
     instance.addHook('preHandler', checkMaintenanceMode);
+
+    // System config (payment details, QR) — needed by payment modal for any
+    // authenticated user; not admin-only.
+    instance.register(systemRoutes);
 
     // ── User + Admin endpoints ───────────────────────────────────────────────
     // generate, stream, batch — rate-limited per user (via route-level preHandler)

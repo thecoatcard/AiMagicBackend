@@ -8,11 +8,13 @@ export async function systemRoutes(fastify) {
   // ── GET /v1/system/payment-details ─────────────────────────────────────────
   fastify.get('/v1/system/payment-details', async () => {
     const cfg = await getAllSystemConfig();
+    // Note: payment_qr_path (raw filesystem path) is intentionally NOT exposed.
+    // Clients should fetch /v1/system/payment-qr or use qr_id (GridFS ObjectId).
     return {
       upi_1: cfg.payment_upi_1 || '',
       upi_2: cfg.payment_upi_2 || '',
       has_qr: !!(cfg.payment_qr_file_id || cfg.payment_qr_path),
-      qr_id: cfg.payment_qr_file_id || (cfg.payment_qr_path ? cfg.payment_qr_path.split(/[\\/]/).pop() : null),
+      qr_id: cfg.payment_qr_file_id || null,
     };
   });
 

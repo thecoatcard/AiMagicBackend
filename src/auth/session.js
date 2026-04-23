@@ -40,7 +40,6 @@ export async function createSession(email, role = 'user', plan = 'free') {
   const redis = getRedis();
   const sessionId = randomBytes(32).toString('hex');
   const key = sessionKey(email);
-  const now = Date.now();
 
   // Role-based session limits
   const limit = (role === 'admin' || role === 'owner') 
@@ -49,8 +48,14 @@ export async function createSession(email, role = 'user', plan = 'free') {
 
   const ttlSeconds = parseDurationToSeconds(config.jwtExpiresIn);
 
+  // Strictly monotonic score: combine wall-clock with a Redis-backed counter
+  // so concurrent createSession calls within the same millisecond still
+  // produce distinct, ordered ZSET scores (older sessions evict first).
+  const counter = await redis.incr('session_score_counter');
+  const score = Date.now() * 1000 + (counter % 1000);
+
   // Atomic: ZADD + EXPIRE + ZREMRANGEBYRANK in a single Lua call
-  const removedCount = await redis.eval(CREATE_SESSION_LUA, 1, key, now, sessionId, ttlSeconds, limit);
+  const removedCount = await redis.eval(CREATE_SESSION_LUA, 1, key, score, sessionId, ttlSeconds, limit);
 
   const token = jwt.sign(
     { email, sessionId, role, plan },
@@ -82,7 +87,7 @@ export async function validateSession(token) {
   if (!score) {
     // Session was either never created, manually logged out, 
     // or superseded by a newer device/expired.
-    return { valid: false, reason: 'session_invalid_or_superseded' };
+    return { valid: false, reason: 'session_superseded' };
   }
 
   // Optional: update timestamp to keep session at the "top" of the stack (sliding window)

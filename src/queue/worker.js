@@ -6,6 +6,7 @@ import { QUEUE_NAME } from './index.js';
 import { notifyAdminWorkerFailure } from '../services/notifications.js';
 import { queueWaitDuration } from '../metrics/index.js';
 import { redisEvents, getActiveRedisUrl } from '../redis/client.js';
+import { creditBackBatchQuota } from '../middleware/rateLimiter.js';
 
 function makeRedisConnection() {
   const url = getActiveRedisUrl();
@@ -48,6 +49,18 @@ export function startWorker(concurrency = 5) {
         max: concurrency,
         duration: 1000,
       },
+      settings: {
+        backoffStrategies: {
+          jitter: (attemptsMade) => {
+            // Cap exponential backoff at 30s to prevent runaway delays.
+            // Orchestrator already retries internally; queue-level backoff
+            // beyond 30s adds no value and starves throughput.
+            const delay = Math.min(Math.pow(2, attemptsMade - 1) * 1000, 30000);
+            const jitter = Math.floor(Math.random() * 1000);
+            return delay + jitter;
+          }
+        }
+      },
     }
   );
 
@@ -57,12 +70,24 @@ export function startWorker(concurrency = 5) {
 
   _worker.on('failed', (job, err) => {
     console.error(`[worker] job ${job?.id} failed: ${err.message}`);
-    if (job && (err instanceof UnrecoverableError || job.attemptsMade >= (job.opts?.attempts ?? 1))) {
+    if (!job) return;
+
+    const isTerminal = err instanceof UnrecoverableError
+      || job.attemptsMade >= (job.opts?.attempts ?? 1);
+
+    if (isTerminal) {
       notifyAdminWorkerFailure({
         jobId:    String(job.id),
         error:    err.message,
         attempts: job.attemptsMade,
       });
+
+      // Credit back quota for terminally-failed BATCH jobs only — single-prompt
+      // generate (non-batch) doesn't go through this code path. Detection: the
+      // batch route is the only producer that sets `batchId` in job.data.
+      if (job.data?.batchId && job.data?.userEmail) {
+        creditBackBatchQuota(job.data.userEmail, 1).catch(() => {});
+      }
     }
   });
 

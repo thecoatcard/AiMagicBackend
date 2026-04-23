@@ -5,6 +5,7 @@ import { getDb } from '../../db/client.js';
 import { config } from '../../config.js';
 import { writeAuditLog } from '../../db/auditLog.js';
 import { notifyAdminDailySummary } from '../../services/notifications.js';
+import { getYesterdayBoundsIST } from '../../services/dailySnapshot.js';
 
 export async function adminAlertsRoutes(fastify) {
   // ── GET /v1/admin/alerts/throttles — view active alert throttle keys ────────
@@ -123,10 +124,11 @@ async function scanKeys(redis, pattern) {
 async function triggerDailySummary() {
   const db = await getDb();
   const redis = getRedis();
-  const yesterday = new Date(Date.now() - 86400 * 1000);
+  // FIX-3: true IST calendar-day window for "yesterday" — no rolling 24h.
+  const { startUtc, endUtc } = getYesterdayBoundsIST();
 
   const [stats] = await db.collection('requests').aggregate([
-    { $match: { created_at: { $gte: yesterday } } },
+    { $match: { created_at: { $gte: startUtc, $lt: endUtc } } },
     {
       $group: {
         _id:             null,
@@ -140,7 +142,7 @@ async function triggerDailySummary() {
   ]).toArray();
 
   const topModelDoc = await db.collection('requests').aggregate([
-    { $match: { created_at: { $gte: yesterday }, status: 'success' } },
+    { $match: { created_at: { $gte: startUtc, $lt: endUtc }, status: 'success' } },
     { $group: { _id: '$model', count: { $sum: 1 } } },
     { $sort: { count: -1 } },
     { $limit: 1 },

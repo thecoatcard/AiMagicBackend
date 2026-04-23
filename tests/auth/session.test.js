@@ -91,7 +91,7 @@ describe('validateSession()', () => {
     mockRedis.zscore.mockResolvedValue(null);
     const result = await validateSession(token);
     expect(result.valid).toBe(false);
-    expect(result.reason).toBe('session_invalid_or_superseded');
+    expect(result.reason).toBe('session_superseded');
   });
 });
 

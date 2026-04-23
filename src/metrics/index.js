@@ -94,6 +94,15 @@ export const batchCompletionDuration = new Histogram({
   registers: [registry],
 });
 
+// ─── Hivemind metrics ────────────────────────────────────────────────────────
+
+export const hivemindEmbeddingsTotal = new Counter({
+  name: 'hivemind_embeddings_total',
+  help: 'Total embedding API calls made for hivemind (hidden cost from user perspective)',
+  labelNames: ['operation', 'status'], // operation: retrieve|store, status: success|failure|timeout
+  registers: [registry],
+});
+
 /**
  * Extract summary statistics (Avg, P50, P90, P99) from a Histogram.
  * Since we don't have a real PromQL engine, we compute approximate percentiles

@@ -8,6 +8,7 @@ import { logRequest, logError } from '../db/logger.js';
 import { notifyAdminNoKeys } from './notifications.js';
 import { recordFailureRateTick, isHivemindRuntimeEnabled } from '../redis/systemConfig.js';
 import { isHivemindEnabled, retrieveContext, storeContext, buildContextPrefix } from './hivemind.js';
+import { getRedis } from '../redis/client.js';
 import {
   requestsTotal,
   requestDuration,
@@ -15,6 +16,7 @@ import {
   keyCooldownsTotal,
   model503Total,
   modelTimeoutsTotal,
+  hivemindEmbeddingsTotal,
 } from '../metrics/index.js';
 
 // Error-type-specific cooldown durations
@@ -74,6 +76,13 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
   // If the user specified a model, start with it.
   // Otherwise pick the healthiest model from the fallback chain.
   let currentModel = model ?? await getBestModel(fallbackModels);
+
+  // Short-circuit: admin may have removed every fallback model AND the caller
+  // omitted `model`. Without this guard the loop would call generateContent()
+  // with `null` and surface confusing upstream errors.
+  if (!currentModel) {
+    return { error: 'No models available', code: 'NO_MODELS', request_id: reqId, httpStatus: 503 };
+  }
 
   // Track position inside the fallback chain.
   // -1 means we are currently on a user-specified model that is not in the chain.
@@ -152,7 +161,19 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
       // ── Hivemind: store prompt+response for future context retrieval ────
       if (hivemindRuntimeOn && isHivemindEnabled() && userEmail && prompt && responseText) {
         const snippet = prompt.slice(0, 200) + '\n---\n' + responseText.slice(0, 300);
-        _embedAndStore(userEmail, snippet).catch(() => {});
+        // Idempotency guard: BullMQ retries can dispatch the same logical
+        // request twice. SET-NX on requestId prevents duplicate hivemind
+        // entries (different UUIDs but identical content) for the same reqId.
+        (async () => {
+          if (reqId) {
+            try {
+              const guardKey = `hm:store_guard:${reqId}`;
+              const acquired = await getRedis().set(guardKey, '1', 'EX', 600, 'NX');
+              if (acquired !== 'OK') return; // already stored for this requestId
+            } catch { /* Redis unreachable — degrade gracefully and proceed */ }
+          }
+          _embedAndStore(userEmail, snippet).catch(() => {});
+        })();
       }
 
       return {
@@ -463,7 +484,11 @@ export async function runImageGeneration({ prompt, options = {}, requestId, user
  */
 async function _embedForHivemind(text) {
   const result = await runEmbed({ text, model: config.hivemindEmbeddingModel });
-  if (result.error) return null;
+  if (result.error) {
+    try { hivemindEmbeddingsTotal.inc({ operation: 'retrieve', status: 'failure' }); } catch { /* metrics outage */ }
+    return null;
+  }
+  try { hivemindEmbeddingsTotal.inc({ operation: 'retrieve', status: 'success' }); } catch { /* metrics outage */ }
   return result.embedding?.values ?? null;
 }
 
@@ -472,9 +497,16 @@ async function _embedForHivemind(text) {
  */
 async function _embedAndStore(userEmail, snippet) {
   try {
-    const vector = await _embedForHivemind(snippet);
+    const result = await runEmbed({ text: snippet, model: config.hivemindEmbeddingModel });
+    if (result.error) {
+      try { hivemindEmbeddingsTotal.inc({ operation: 'store', status: 'failure' }); } catch { /* metrics outage */ }
+      return;
+    }
+    try { hivemindEmbeddingsTotal.inc({ operation: 'store', status: 'success' }); } catch { /* metrics outage */ }
+    const vector = result.embedding?.values ?? null;
     if (vector) await storeContext(userEmail, snippet, vector);
   } catch (err) {
+    try { hivemindEmbeddingsTotal.inc({ operation: 'store', status: 'failure' }); } catch { /* metrics outage */ }
     console.warn('[Hivemind] embedAndStore error:', err.message);
   }
 }

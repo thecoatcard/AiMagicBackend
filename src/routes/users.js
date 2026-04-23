@@ -111,17 +111,38 @@ export async function usersRoutes(fastify) {
         reply.status(400);
         return { error: 'plan is required for set_plan action', code: 'MISSING_PLAN' };
       }
-      
-      const update = { plan };
+
       if (plan === 'premium') {
-        const expiresAt = new Date();
-        expiresAt.setDate(expiresAt.getDate() + 30);
-        update.premium_expires_at = expiresAt;
+        // Per-user iteration so we can EXTEND existing premium expiry
+        // by 30 days instead of truncating it. Mirrors single-user setUserPlan.
+        let matched = 0;
+        let modified = 0;
+        const now = Date.now();
+        const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+        for (const email of safeEmails) {
+          const existing = await getUser(email);
+          if (!existing) continue;
+          const currentExpiry = existing.premium_expires_at
+            ? new Date(existing.premium_expires_at).getTime()
+            : 0;
+          const base = (existing.plan === 'premium' && currentExpiry > now)
+            ? currentExpiry
+            : now;
+          const newExpiry = new Date(base + THIRTY_DAYS_MS);
+          const ok = await setUserPlan(email, 'premium', newExpiry);
+          if (ok) { matched += 1; modified += 1; }
+        }
+        result = { matched, modified };
       } else {
-        update.premium_expires_at = null; // unset if moving to free
+        // Downgrading to free: clear premium_expires_at AND any per-user
+        // daily-limit override so the new plan limit takes effect immediately.
+        result = await bulkUpdateUsers(
+          safeEmails,
+          { plan },
+          { 'limits.max_requests_per_day': '', premium_expires_at: '' }
+        );
       }
 
-      result = await bulkUpdateUsers(safeEmails, update);
       // Bust caches for all affected users
       await Promise.all(safeEmails.map(e => invalidateUserLimitsCache(e).catch(() => {})));
     }
