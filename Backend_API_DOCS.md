@@ -26,7 +26,7 @@
 17. [Admin — Alerts & Notifications](#17-admin--alerts--notifications)
 18. [Admin — Health Dashboard](#18-admin--health-dashboard)
 19. [Admin — Audit Log](#19-admin--audit-log)
-20. [Payment & Public System Routes](#20-payment--public-system-routes)
+20. [Payment & System Info Routes](#20-payment--system-info-routes)
 21. [Infrastructure](#21-infrastructure)
 22. [Error Reference](#22-error-reference)
 23. [Full Flow Examples](#23-full-flow-examples)
@@ -2373,9 +2373,15 @@ View all current system flags and configuration.
   "gen_temperature":         null,
   "gen_max_tokens":          null,
   "max_sessions_user":       1,
-  "max_sessions_admin":      3
+  "max_sessions_admin":      3,
+  "payment_upi_1":           "user@upi",
+  "payment_upi_2":           "9876543210@paytm",
+  "payment_qr_path":         "",
+  "payment_qr_file_id":      "64f1a2b3..."
 }
 ```
+
+> `payment_*` fields reflect the live UPI/QR configuration. The `payment_qr_path` field is the legacy disk path (kept for backwards compatibility); new uploads always populate `payment_qr_file_id` (GridFS ObjectId) instead.
 
 ---
 
@@ -2534,6 +2540,176 @@ Remove a whitelist rule.
 ```json
 { "type": "domain", "value": "mycompany.com" }
 ```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `type` | string | ✅ | `email` or `domain` |
+| `value` | string | ✅ | The exact rule value to remove |
+
+No additional properties allowed.
+
+**Response `200`:**
+```json
+{ "removed": true, "type": "domain", "value": "mycompany.com" }
+```
+
+**Response `404`:**
+```json
+{ "error": "Rule not found" }
+```
+
+---
+
+### `PATCH /v1/admin/system/payment`
+
+Update the UPI payment IDs displayed in the in-app payment modal. Either or both fields may be provided.
+
+**Authentication required. Owner only.**
+
+**Request:**
+```json
+{
+  "upi_1": "user@upi",
+  "upi_2": "9876543210@paytm"
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `upi_1` | string | ❌ | Primary UPI ID (max 100 chars). Send empty string to clear. |
+| `upi_2` | string | ❌ | Secondary UPI ID (max 100 chars). Send empty string to clear. |
+
+No additional properties allowed.
+
+**Response `200`:**
+```json
+{ "updated": true, "upi_1": "user@upi", "upi_2": "9876543210@paytm" }
+```
+
+> Audited as `payment_config_update`.
+
+---
+
+### `POST /v1/admin/system/payment-qr`
+
+Upload a payment QR code image. Replaces any existing QR (old GridFS file and any legacy disk file are deleted).
+
+**Authentication required. Owner only.**
+
+**Request:** `multipart/form-data` with a single file part.
+
+| Part | Kind | Required | Description |
+|---|---|---|---|
+| *(any name)* | **file** | ✅ | Image file. Allowed extensions: `.jpg`, `.jpeg`, `.png`, `.webp` |
+
+The file is streamed into MongoDB GridFS under the `tools` bucket with metadata `{ type: "payment_qr", originalName: <filename> }`.
+
+**Response `200`:**
+```json
+{
+  "success":  true,
+  "filename": "qr-code.png",
+  "fileId":   "64f1a2b3c4d5e6f7a8b9c0d1"
+}
+```
+
+**Error responses:**
+
+| Status | `code` | Meaning |
+|---|---|---|
+| `400` | `NOT_MULTIPART` | Request body was not `multipart/form-data` |
+| `400` | `NO_FILE` | Multipart request sent without a file part |
+| `400` | `INVALID_TYPE` | File extension is not jpg/jpeg/png/webp |
+
+> Audited as `payment_qr_upload`.
+
+---
+
+### `DELETE /v1/admin/system/payment-qr`
+
+Remove the configured payment QR code (deletes the GridFS file and clears any legacy disk reference).
+
+**Authentication required. Owner only.**
+
+**Response `200`:**
+```json
+{ "success": true }
+```
+
+> Always returns success even if no QR was configured. Audited as `payment_qr_delete`.
+
+---
+
+### `GET /v1/admin/system/emails`
+
+View which categories of system emails are currently enabled. The OTP email is always on and cannot be disabled.
+
+**Authentication required. Owner only.**
+
+**Response `200`:**
+```json
+{
+  "security":     true,
+  "status":       true,
+  "tickets":      true,
+  "quota":        false,
+  "admin_health": true,
+  "otp":          true
+}
+```
+
+| Field | Triggers |
+|---|---|
+| `security` | New-device login notification, account-blocked notification |
+| `status` | Account status change (block / unblock / role / plan change) |
+| `tickets` | Admin response & ticket-resolved emails to ticket creator |
+| `quota` | Daily-quota exceeded notice to user |
+| `admin_health` | Owner alert emails (high failure rate, queue backlog, key pool low, daily summary, test email) |
+| `otp` | Sign-in OTP — always `true`, not toggleable |
+
+---
+
+### `PATCH /v1/admin/system/emails`
+
+Enable or disable categories of system emails. At least one field is required; only fields present are changed.
+
+**Authentication required. Owner only.**
+
+**Request:**
+```json
+{
+  "security":     true,
+  "status":       true,
+  "tickets":      true,
+  "quota":        false,
+  "admin_health": true
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `security` | boolean | Toggle security/login emails |
+| `status` | boolean | Toggle account status change emails |
+| `tickets` | boolean | Toggle ticket admin-response emails |
+| `quota` | boolean | Toggle daily-quota exceeded emails |
+| `admin_health` | boolean | Toggle owner alert / daily summary emails |
+
+The `otp` field cannot be modified. No additional properties allowed.
+
+**Response `200`:**
+```json
+{
+  "updated":      true,
+  "security":     true,
+  "status":       true,
+  "tickets":      true,
+  "quota":        false,
+  "admin_health": true,
+  "otp":          true
+}
+```
+
+> Audited as `email_config_update`.
 
 **Response `200`:**
 ```json
@@ -2928,6 +3104,10 @@ Query the audit log with optional filters and pagination.
 | `plan_limit_update` | `PATCH /v1/admin/system/plan-limits` |
 | `whitelist_add` | `POST /v1/admin/whitelist` |
 | `whitelist_remove` | `DELETE /v1/admin/whitelist` |
+| `payment_config_update` | `PATCH /v1/admin/system/payment` |
+| `payment_qr_upload` | `POST /v1/admin/system/payment-qr` |
+| `payment_qr_delete` | `DELETE /v1/admin/system/payment-qr` |
+| `email_config_update` | `PATCH /v1/admin/system/emails` |
 | `alert_throttles_cleared` | `DELETE /v1/admin/alerts/throttles` |
 | `alert_thresholds_update` | `PATCH /v1/admin/alerts/thresholds` |
 | `test_email_sent` | `POST /v1/admin/alerts/test` |
@@ -2939,15 +3119,15 @@ Query the audit log with optional filters and pagination.
 
 ---
 
-## 20. Payment & Public System Routes
+## 20. Payment & System Info Routes
 
-These endpoints do **not** require authentication.
+These endpoints expose UPI payment configuration to authenticated clients (the in-app payment modal). They are mounted inside the protected `/v1/*` scope, so a valid JWT is required.
 
 ### `GET /v1/system/payment-details`
 
 Get the configured UPI payment details and QR code availability.
 
-**No authentication required.**
+**Authentication required. Any role.**
 
 **Response `200`:**
 ```json
@@ -2960,21 +3140,26 @@ Get the configured UPI payment details and QR code availability.
 ```
 
 > `has_qr` is `false` and `qr_id` is `null` if no QR code has been uploaded.
+> The raw filesystem `payment_qr_path` is intentionally never exposed — clients must use either `qr_id` (GridFS ObjectId) or fetch `/v1/system/payment-qr` directly.
 
 ---
 
 ### `GET /v1/system/payment-qr`
 
-Download the payment QR code image.
+Download the payment QR code image. Streams the file from GridFS (preferred) with a legacy fallback to the local `uploads/` directory.
 
-**No authentication required.**
+**Authentication required. Any role.**
 
-**Response `200`:** Binary image stream with appropriate `Content-Type`.
+**Response `200`:** Binary image stream with appropriate `Content-Type` (`image/png`, `image/jpeg`, or `image/webp`).
+
+**Response `403`** (`FORBIDDEN`): Legacy disk path resolved outside of `uploads/`.
 
 **Response `404`:**
 ```json
-{ "error": "No payment QR code found", "code": "QR_NOT_FOUND" }
+{ "error": "QR code not found", "code": "QR_NOT_FOUND" }
 ```
+
+> To configure these values, owners use the admin endpoints in [Section 16 — Admin System Control](#16-admin--system-control): `PATCH /v1/admin/system/payment` (UPI IDs), `POST /v1/admin/system/payment-qr` (upload QR), `DELETE /v1/admin/system/payment-qr` (remove QR).
 
 ---
 
@@ -3374,7 +3559,7 @@ This section provides specific scenarios for the QA team to verify system integr
 
 | Section | Endpoints | Auth Level |
 |---|---|---|
-| Auth | 4 | Public |
+| Auth | 4 | Public (login/verify) + JWT (logout/me) |
 | Generate | 1 | User + Rate Limited |
 | Embeddings | 1 | User + Rate Limited |
 | Stream | 1 | User + Rate Limited |
@@ -3393,6 +3578,6 @@ This section provides specific scenarios for the QA team to verify system integr
 | Admin Health | 1 | Owner |
 | Admin Audit | 1 | Owner |
 | Admin Tools | 4 | Owner |
-| Payment (public) | 2 | Public |
+| Payment / System Info | 2 | JWT (any role) |
 | Health | 2 | Public |
 | **Total** | **99** | |
