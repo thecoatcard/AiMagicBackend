@@ -198,7 +198,7 @@ export async function analyticsRoutes(fastify) {
 
   // GET /v1/analytics/users — per-user usage stats (admin only)
   fastify.get('/v1/analytics/users', {
-    preHandler: requireOwner,
+    preHandler: requireAdmin,
     schema: {
       querystring: {
         type: 'object',
