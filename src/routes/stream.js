@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 import { config } from '../config.js';
 import { getKey, returnKey, cooldownKey, disableKey, recordKeySuccess, recordKeyFailure, isPoolExhausted } from '../redis/keyPool.js';
 import { recordSuccess, recordFailure, getBestModel } from '../redis/modelHealth.js';
-import { getFallbackModels } from '../redis/modelConfig.js';
+import { getActiveFallbackModels } from '../redis/modelConfig.js';
 import { streamGenerateContent } from '../services/gemini.js';
 import { logRequest, logError } from '../db/logger.js';
 import { checkUserRateLimit, refundQuota } from '../middleware/rateLimiter.js';
@@ -135,7 +135,7 @@ export async function streamRoutes(fastify) {
     }
 
     // ── Model selection — mirrors orchestrator.js logic ──────────────────────
-    const fallbackModels = await getFallbackModels();
+    const fallbackModels = await getActiveFallbackModels();
     let currentModel = model ?? await getBestModel(fallbackModels);
 
     // Short-circuit: if admin removed all fallback models AND caller omitted

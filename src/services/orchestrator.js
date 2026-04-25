@@ -3,7 +3,7 @@ import { config } from '../config.js';
 import { getKey, returnKey, cooldownKey, disableKey, recordKeySuccess, recordKeyFailure, isPoolExhausted } from '../redis/keyPool.js';
 import { generateContent, embedContent, batchEmbedContents, generateImage } from './gemini.js';
 import { recordSuccess, recordFailure, getBestModel } from '../redis/modelHealth.js';
-import { getFallbackModels, getImageModels } from '../redis/modelConfig.js';
+import { getActiveFallbackModels, getImageModels } from '../redis/modelConfig.js';
 import { logRequest, logError } from '../db/logger.js';
 import { notifyAdminNoKeys } from './notifications.js';
 import { recordFailureRateTick, isHivemindRuntimeEnabled } from '../redis/systemConfig.js';
@@ -71,7 +71,7 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
   }
 
   // Load the current fallback chain (admin-configurable, stored in Redis)
-  const fallbackModels = await getFallbackModels();
+  const fallbackModels = await getActiveFallbackModels();
 
   // If the user specified a model, start with it.
   // Otherwise pick the healthiest model from the fallback chain.

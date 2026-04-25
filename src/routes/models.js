@@ -5,6 +5,8 @@ import {
   addFallbackModel,
   removeFallbackModel,
   getFallbackModels,
+  getActiveFallbackModels,
+  toggleFallbackModelStatus,
   getImageModels,
 } from '../redis/modelConfig.js';
 import { requireOwner } from '../auth/roles.js';
@@ -16,7 +18,7 @@ export async function modelsRoutes(fastify) {
   fastify.get('/v1/models/available', async () => {
     const [stats, configModels] = await Promise.all([
       listAllModels(),
-      getFallbackModels()
+      getActiveFallbackModels()
     ]);
     
     // Combine models with health data + models in admin config chain
@@ -128,6 +130,27 @@ export async function modelsRoutes(fastify) {
       return { error: 'Model not in fallback list', code: 'NOT_FOUND', model: name };
     }
     return { removed: true, model: name, ...(await getModelConfig()) };
+  });
+
+  // POST /v1/models/config/fallback/:name/toggle — toggle disabled state
+  fastify.post('/v1/models/config/fallback/:name/toggle', {
+    preHandler: [requireOwner],
+    schema: {
+      body: {
+        type: 'object',
+        required: ['disabled'],
+        properties: { disabled: { type: 'boolean' } },
+      },
+    },
+  }, async (request, reply) => {
+    const { name } = request.params;
+    const { disabled } = request.body;
+    const result = await toggleFallbackModelStatus(name, disabled);
+    if (!result.updated) {
+      reply.status(404);
+      return { error: 'Model not in fallback list', code: 'NOT_FOUND', model: name };
+    }
+    return { toggled: true, model: name, disabled, ...(await getModelConfig()) };
   });
 
   // ── Image model config ────────────────────────────────────────────────────
