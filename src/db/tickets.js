@@ -29,18 +29,50 @@ export async function ensureTicketTextIndex() {
 /**
  * Insert a new ticket. Returns the serialized ticket document.
  */
-export async function createTicket({ userEmail, subject, description, priority = 'medium', screenshotPath = null, screenshotId = null }) {
+export async function createTicket({ userEmail, subject, description, priority = 'medium', screenshotId = null }) {
   const db = await getDb();
   const now = new Date();
+  
+  // First message in the chat
+  const firstMessage = {
+    role: 'user',
+    text: description,
+    screenshot_id: screenshotId ? new ObjectId(screenshotId) : null,
+    created_at: now
+  };
+
   const result = await db.collection('tickets').insertOne({
     user_email: userEmail,
     subject,
-    description,
-    priority,
     status: 'open',
-    screenshot_path: screenshotPath, // legacy disk path
-    screenshot_id:   screenshotId ? new ObjectId(screenshotId) : null, // persistent gridfs id
-    admin_response: null,
+    priority,
+    messages: [firstMessage],
+    created_at: now,
+    updated_at: now,
+  });
+  return getTicketById(result.insertedId.toString());
+}
+
+/**
+ * Create a direct chat initiated by an admin.
+ */
+export async function createDirectChat({ userEmail, text }) {
+  const db = await getDb();
+  const now = new Date();
+  
+  const firstMessage = {
+    role: 'owner',
+    text: text,
+    screenshot_id: null,
+    created_at: now
+  };
+
+  const result = await db.collection('tickets').insertOne({
+    user_email: userEmail,
+    subject: 'Direct Support Chat',
+    status: 'open',
+    priority: 'medium',
+    messages: [firstMessage],
     created_at: now,
     updated_at: now,
   });
@@ -88,14 +120,12 @@ export async function listTickets({ userEmail, status, priority, search, from, t
 }
 
 /**
- * Update a ticket (admin action).
- * Returns the updated serialized ticket, or null if not found.
+ * Update a ticket status or priority.
  */
-export async function updateTicket(id, { status, admin_response, priority, admin_notes } = {}) {
+export async function updateTicket(id, { status, priority, admin_notes } = {}) {
   const db = await getDb();
   const set = { updated_at: new Date() };
   if (status         !== undefined) set.status         = status;
-  if (admin_response !== undefined) set.admin_response = admin_response;
   if (priority       !== undefined) set.priority       = priority;
   if (admin_notes    !== undefined) set.admin_notes    = admin_notes;
 
@@ -103,6 +133,34 @@ export async function updateTicket(id, { status, admin_response, priority, admin
     const doc = await db.collection('tickets').findOneAndUpdate(
       { _id: new ObjectId(id) },
       { $set: set },
+      { returnDocument: 'after' }
+    );
+    return serialize(doc);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Append a new message to a ticket (chat).
+ */
+export async function appendMessage(id, { role, text, screenshotId = null }) {
+  const db = await getDb();
+  const now = new Date();
+  const message = {
+    role,
+    text,
+    screenshot_id: screenshotId ? new ObjectId(screenshotId) : null,
+    created_at: now
+  };
+
+  try {
+    const doc = await db.collection('tickets').findOneAndUpdate(
+      { _id: new ObjectId(id) },
+      { 
+        $push: { messages: message },
+        $set: { updated_at: now }
+      },
       { returnDocument: 'after' }
     );
     return serialize(doc);
@@ -169,12 +227,14 @@ function serialize(doc) {
     id:             doc._id.toString(),
     user_email:     doc.user_email,
     subject:        doc.subject,
-    description:    doc.description,
     priority:       doc.priority,
     status:         doc.status,
-    screenshot_path: doc.screenshot_path ?? null,
-    screenshot_id:   doc.screenshot_id ? doc.screenshot_id.toString() : null,
-    admin_response: doc.admin_response,
+    messages:       (doc.messages || []).map(m => ({
+      role:          m.role,
+      text:          m.text,
+      screenshot_id: m.screenshot_id ? m.screenshot_id.toString() : null,
+      created_at:    m.created_at,
+    })),
     admin_notes:    doc.admin_notes ?? null,
     created_at:     doc.created_at,
     updated_at:     doc.updated_at,

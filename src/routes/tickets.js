@@ -6,6 +6,8 @@ import {
   deleteTicket,
   getTicketStats,
   bulkCloseTickets,
+  appendMessage,
+  createDirectChat,
 } from '../db/tickets.js';
 import { requireAdmin, requireOwner } from '../auth/roles.js';
 import {
@@ -111,8 +113,48 @@ export async function ticketsRoutes(fastify) {
     reply.status(201);
     return ticket;
   });
+  
+  // ── POST /v1/tickets/direct — admin initiates a chat (admin only) ─────────
+  fastify.post('/v1/tickets/direct', {
+    preHandler: requireAdmin,
+    schema: {
+      body: {
+        type: 'object',
+        required: ['userEmail', 'text'],
+        properties: {
+          userEmail: { type: 'string', format: 'email' },
+          text:      { type: 'string', minLength: 1 },
+        },
+        additionalProperties: false,
+      },
+    },
+  }, async (request, reply) => {
+    const { userEmail, text } = request.body;
+    
+    // Create new direct chat
+    const ticket = await createDirectChat({ userEmail, text });
+    
+    // Notify user
+    notifyTicketReply(userEmail, { 
+      ticketId: ticket.id, 
+      subject: ticket.subject, 
+      adminResponse: text, 
+      status: ticket.status 
+    });
+
+    writeAuditLog({ 
+      actorEmail: request.user.email, 
+      action: 'admin_initiate_chat', 
+      targetEmail: userEmail,
+      meta: { ticketId: ticket.id } 
+    });
+
+    reply.status(201);
+    return ticket;
+  });
 
   fastify.get('/v1/tickets/:id/screenshot', async (request, reply) => {
+    const { msg_idx } = request.query;
     const ticket = await getTicketById(request.params.id);
     if (!ticket) {
       reply.status(404);
@@ -126,42 +168,28 @@ export async function ticketsRoutes(fastify) {
       return { error: 'Forbidden', code: 'FORBIDDEN' };
     }
 
-    // 1. Prefer GridFS
-    if (ticket.screenshot_id) {
+    let screenshotId = ticket.screenshot_id;
+
+    // If msg_idx is provided, look in messages array
+    if (msg_idx !== undefined) {
+      const idx = parseInt(msg_idx);
+      if (ticket.messages && ticket.messages[idx]) {
+        screenshotId = ticket.messages[idx].screenshot_id;
+      }
+    }
+
+    if (screenshotId) {
       const bucket = await getToolsBucket();
       try {
-        const downloadStream = bucket.openDownloadStream(new ObjectId(ticket.screenshot_id));
-        
+        const downloadStream = bucket.openDownloadStream(new ObjectId(screenshotId));
         downloadStream.on('error', () => {
           if (!reply.sent) reply.status(404).send({ error: 'Screenshot not found in database' });
         });
-
-        // We don't strictly know the content type here unless we query GridFS files, 
-        // but image/png is a safe default for browser rendering of common formats.
         reply.header('Content-Type', 'image/png'); 
         return reply.send(downloadStream);
       } catch (err) {
         // Fall through
       }
-    }
-
-    // 2. Fallback to Disk (Legacy)
-    if (ticket.screenshot_path && existsSync(ticket.screenshot_path)) {
-      const normalizedPath = path.resolve(ticket.screenshot_path);
-      const uploadsDir = path.resolve('uploads');
-      if (!normalizedPath.startsWith(uploadsDir + path.sep) && normalizedPath !== uploadsDir) {
-        reply.status(403);
-        return { error: 'Forbidden', code: 'FORBIDDEN' };
-      }
-      const ext = ticket.screenshot_path.split('.').pop().toLowerCase();
-      const mimeTypesMapping = {
-        png: 'image/png',
-        jpg: 'image/jpeg',
-        jpeg: 'image/jpeg',
-        webp: 'image/webp',
-      };
-      reply.header('Content-Type', mimeTypesMapping[ext] || 'application/octet-stream');
-      return reply.send(createReadStream(ticket.screenshot_path));
     }
 
     reply.status(404);
@@ -266,7 +294,68 @@ export async function ticketsRoutes(fastify) {
     return ticket;
   });
 
-  // ── PATCH /v1/tickets/:id — update ticket status / add response (admin) ────
+  // ── POST /v1/tickets/:id/messages — add a message to chat ─────────────
+  fastify.post('/v1/tickets/:id/messages', async (request, reply) => {
+    const isAdmin = request.user.role === 'admin' || request.user.role === 'owner';
+    const ticket = await getTicketById(request.params.id);
+
+    if (!ticket) {
+      reply.status(404);
+      return { error: 'Ticket not found', code: 'NOT_FOUND' };
+    }
+
+    // Auth check
+    if (!isAdmin && ticket.user_email !== request.user.email) {
+      reply.status(403);
+      return { error: 'Forbidden', code: 'FORBIDDEN' };
+    }
+
+    let text = '', screenshotId = null;
+    
+    if (request.isMultipart()) {
+      const parts = request.parts();
+      const bucket = await getToolsBucket();
+      for await (const part of parts) {
+        if (part.type === 'file') {
+          if (part.fieldname === 'screenshot' || part.fieldname === 'image') {
+            const ext = part.filename.split('.').pop().toLowerCase();
+            const uploadStream = bucket.openUploadStream(part.filename, {
+              contentType: part.mimetype || `image/${ext === 'jpg' ? 'jpeg' : ext}`,
+              metadata: { type: 'chat_image', user: request.user.email, ticketId: request.params.id }
+            });
+            await new Promise((res, rej) => {
+              part.file.pipe(uploadStream);
+              uploadStream.on('finish', res);
+              uploadStream.on('error', rej);
+            });
+            screenshotId = uploadStream.id.toString();
+          }
+        } else if (part.fieldname === 'text') {
+          text = part.value;
+        }
+      }
+    } else {
+      text = request.body.text;
+    }
+
+    if (!text && !screenshotId) {
+      reply.status(400);
+      return { error: 'Message text or image is required', code: 'BAD_REQUEST' };
+    }
+
+    const role = isAdmin ? 'owner' : 'user';
+    const updated = await appendMessage(request.params.id, { role, text, screenshotId });
+
+    if (role === 'owner') {
+      notifyTicketReply(ticket.user_email, { ticketId: ticket.id, subject: ticket.subject, adminResponse: text, status: ticket.status });
+    } else {
+      notifyAdminNewTicket({ ticketId: ticket.id, userEmail: ticket.user_email, subject: ticket.subject, description: text });
+    }
+
+    return updated;
+  });
+
+  // ── PATCH /v1/tickets/:id — update ticket status / priority (admin) ────────
   fastify.patch('/v1/tickets/:id', {
     preHandler: requireAdmin,
     schema: {
@@ -275,7 +364,6 @@ export async function ticketsRoutes(fastify) {
         minProperties: 1,
         properties: {
           status:         { type: 'string', enum: VALID_STATUSES },
-          admin_response: { type: 'string', maxLength: 5000 },
           priority:       { type: 'string', enum: VALID_PRIORITIES },
           admin_notes:    { type: 'string', maxLength: 2000 },
         },
@@ -283,31 +371,23 @@ export async function ticketsRoutes(fastify) {
       },
     },
   }, async (request, reply) => {
-    const { status, admin_response, priority, admin_notes } = request.body;
-    const updated = await updateTicket(request.params.id, { status, admin_response, priority, admin_notes });
+    const { status, priority, admin_notes } = request.body;
+    const updated = await updateTicket(request.params.id, { status, priority, admin_notes });
 
     if (!updated) {
       reply.status(404);
       return { error: 'Ticket not found', id: request.params.id };
     }
 
-    const userEmail = updated.user_email;
-    const subject   = updated.subject;
-    const ticketId  = updated.id;
-
-    if (admin_response) {
-      // Admin posted a reply — notify user with the response text
-      notifyTicketReply(userEmail, { ticketId, subject, adminResponse: admin_response, status: updated.status });
-    } else if (status === 'resolved' || status === 'closed') {
-      // Status-only update that closes the ticket
-      notifyTicketClosed(userEmail, { ticketId, subject, status });
+    if (status === 'resolved' || status === 'closed') {
+      notifyTicketClosed(updated.user_email, { ticketId: updated.id, subject: updated.subject, status });
     }
 
     writeAuditLog({
       actorEmail:  request.user.email,
       action:      'update_ticket',
-      targetEmail: userEmail,
-      meta:        { ticketId, status, priority, hasResponse: !!admin_response },
+      targetEmail: updated.user_email,
+      meta:        { ticketId: updated.id, status, priority },
     });
 
     return updated;

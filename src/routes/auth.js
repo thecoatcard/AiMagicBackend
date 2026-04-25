@@ -10,6 +10,8 @@ import { config } from '../config.js';
 import { isEmailAllowed } from '../db/whitelist.js';
 import { isRegistrationEnabled } from '../redis/systemConfig.js';
 import { getRedis } from '../redis/client.js';
+import { getUser } from '../db/users.js';
+
 
 /**
  * Redis-backed throttle. Increments key and sets TTL on first hit.
@@ -81,6 +83,10 @@ export async function authRoutes(fastify) {
       return { error: 'This email address is not authorised to access this service.', code: 'NOT_WHITELISTED' };
     }
 
+    const existingUser = await getUser(email);
+    const isNewUser = !existingUser;
+
+
     // Generate OTP value first; only persist to Redis after email send succeeds.
     const otp = createOtpValue();
 
@@ -95,7 +101,10 @@ export async function authRoutes(fastify) {
     // Email succeeded → persist OTP to Redis.
     await persistOtp(email, otp);
 
-    return { message: 'OTP sent to your email. It expires in 10 minutes.' };
+    return { 
+      message: 'OTP sent to your email. It expires in 10 minutes.',
+      isNewUser 
+    };
   });
 
   // ── Step 2: Verify OTP → receive JWT ────────────────────────────────────
@@ -107,6 +116,7 @@ export async function authRoutes(fastify) {
         properties: {
           email: { type: 'string', format: 'email' },
           otp:   { type: 'string', minLength: 6, maxLength: 6, pattern: '^[0-9]{6}$' },
+          referralCode: { type: 'string' },
         },
       },
     },
@@ -114,7 +124,7 @@ export async function authRoutes(fastify) {
       // 10 attempts per IP per minute, 10 attempts per email per 10 minutes
       authThrottlePreHandler(request, reply, 'verify', 10, 60, 10, 600),
   }, async (request, reply) => {
-    const { email, otp } = request.body;
+    const { email, otp, referralCode } = request.body;
 
     const result = await verifyOtp(email, otp);
 
@@ -124,7 +134,7 @@ export async function authRoutes(fastify) {
     }
 
     // Upsert user document — creates with role:'user' if first login
-    const userDoc = await getOrCreateUser(email);
+    const userDoc = await getOrCreateUser(email, referralCode);
     const role = userDoc?.role ?? 'user';
 
     // Create new session — enforces limit (1 for user, 3 for admin/owner)

@@ -335,12 +335,18 @@ export async function usersRoutes(fastify) {
       newPlan:  plan,
       newLimit: await getPlanDailyLimit(plan),
     });
+    writeAuditLog({ 
+      actorEmail: request.user.email, 
+      action: 'change_plan', 
+      targetEmail: email, 
+      meta: { old_plan: existingUser?.plan ?? 'free', new_plan: plan } 
+    });
     return { updated: true, email, plan, premium_expires_at: expiresAt };
   });
 
-  // ── DELETE /v1/users/:email — remove user (admin only) ────────────────────
+  // ── DELETE /v1/users/:email — remove user (owner only) ────────────────────
   fastify.delete('/v1/users/:email', {
-    preHandler: requireAdmin,
+    preHandler: requireOwner,
   }, async (request, reply) => {
     const email = decodeURIComponent(request.params.email);
     if (email === request.user.email) {
@@ -358,6 +364,7 @@ export async function usersRoutes(fastify) {
     }
     // Invalidate session so the deleted user is logged out immediately
     await invalidateSession(email);
+    writeAuditLog({ actorEmail: request.user.email, action: 'delete_user', targetEmail: email });
     reply.status(204);
     return '';
   });

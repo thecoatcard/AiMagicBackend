@@ -134,6 +134,9 @@ export async function generateRoutes(fastify) {
     const result = await runGenerate({ prompt: prompt ?? '', model, options, userEmail: request.user?.email });
 
     if (result.error) {
+      if (request.user?.email) {
+        refundQuota(request.user.email, 1).catch(() => {});
+      }
       reply.status(result.httpStatus ?? 500);
     }
     const { httpStatus: _, ...response } = result;
@@ -162,6 +165,9 @@ export async function generateRoutes(fastify) {
     const result = await runEmbed({ text, model, userEmail: request.user?.email });
 
     if (result.error) {
+      if (request.user?.email) {
+        refundQuota(request.user.email, 1).catch(() => {});
+      }
       reply.status(result.httpStatus ?? 500);
     }
     const { httpStatus: _, ...response } = result;

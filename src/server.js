@@ -26,6 +26,8 @@ import { adminAlertsRoutes } from './routes/admin/alerts.js';
 import { adminHealthRoutes } from './routes/admin/health.js';
 import { adminAuditRoutes } from './routes/admin/audit.js';
 import { adminToolsRoutes } from './routes/admin/tools.js';
+import { referralRoutes } from './routes/referrals.js';
+
 
 export function buildServer() {
   mkdirSync('uploads/payments', { recursive: true });
@@ -88,6 +90,8 @@ export function buildServer() {
     instance.register(toolsRoutes);
     // models — listing available models is public for chat settings; admin routes protected inline
     instance.register(modelsRoutes);
+    instance.register(referralRoutes);
+
 
     // ── Admin-only endpoints (Common) ────────────────────────────────────────
     instance.register(async (admin) => {

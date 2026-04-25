@@ -5,7 +5,7 @@ import { recordSuccess, recordFailure, getBestModel } from '../redis/modelHealth
 import { getFallbackModels } from '../redis/modelConfig.js';
 import { streamGenerateContent } from '../services/gemini.js';
 import { logRequest, logError } from '../db/logger.js';
-import { checkUserRateLimit } from '../middleware/rateLimiter.js';
+import { checkUserRateLimit, refundQuota } from '../middleware/rateLimiter.js';
 import { notifyAdminNoKeys } from '../services/notifications.js';
 import { imagesSchema, historySchema, filesSchema } from './generate.js';
 import { parseFileToContent } from '../services/fileParsers.js';
@@ -141,6 +141,7 @@ export async function streamRoutes(fastify) {
     // Short-circuit: if admin removed all fallback models AND caller omitted
     // `model`, send a clean 503 instead of looping with a null model.
     if (!currentModel) {
+      if (userEmail) refundQuota(userEmail, 1).catch(() => {});
       reply.status(503);
       return { error: 'No models available', code: 'NO_MODELS', request_id: requestId };
     }
@@ -177,6 +178,7 @@ export async function streamRoutes(fastify) {
         logRequest({ request_id: requestId, model: currentModel, api_key_masked: lastKeyMasked, latency_ms: 0, status: 'error', retries, prompt_length: promptLength, user_email: userEmail });
         requestsTotal.inc({ model: currentModel ?? 'unknown', status: 'no_keys' });
         notifyAdminNoKeys();
+        if (userEmail) refundQuota(userEmail, 1).catch(() => {});
         reply.status(503);
         return { error: 'No API keys available', code: 'NO_KEYS', request_id: requestId };
       }
@@ -216,6 +218,7 @@ export async function streamRoutes(fastify) {
         logError({ type: 'other', model: currentModel, key_masked: lastKeyMasked, message: err.message });
         logRequest({ request_id: requestId, model: currentModel, api_key_masked: lastKeyMasked, latency_ms: 0, status: 'error', retries, prompt_length: promptLength, user_email: userEmail });
         requestsTotal.inc({ model: currentModel, status: 'error' });
+        if (userEmail) refundQuota(userEmail, 1).catch(() => {});
         reply.status(502);
         return { error: err.message, code: 'UPSTREAM_ERROR', request_id: requestId };
       }
@@ -280,6 +283,7 @@ export async function streamRoutes(fastify) {
         logError({ type: String(result.status), model: currentModel, key_masked: lastKeyMasked, message: `Streaming error status: ${result.status}` });
         logRequest({ request_id: requestId, model: currentModel, api_key_masked: lastKeyMasked, latency_ms: 0, status: 'error', retries, prompt_length: promptLength, user_email: userEmail });
         requestsTotal.inc({ model: currentModel, status: String(result.status) });
+        if (userEmail) refundQuota(userEmail, 1).catch(() => {});
         reply.status(result.status >= 400 && result.status < 600 ? result.status : 502);
         return { error: 'Gemini API error', code: String(result.status), request_id: requestId };
       }
@@ -431,6 +435,7 @@ export async function streamRoutes(fastify) {
     }
     logRequest({ request_id: requestId, model: currentModel, api_key_masked: lastKeyMasked, latency_ms: 0, status: 'exhausted', retries, prompt_length: promptLength, user_email: userEmail });
     requestsTotal.inc({ model: currentModel ?? 'unknown', status: 'exhausted' });
+    if (userEmail) refundQuota(userEmail, 1).catch(() => {});
     reply.status(503);
     return { error: 'All retries exhausted', code: 'RETRIES_EXHAUSTED', request_id: requestId };
   });

@@ -6,7 +6,7 @@ import { QUEUE_NAME } from './index.js';
 import { notifyAdminWorkerFailure } from '../services/notifications.js';
 import { queueWaitDuration } from '../metrics/index.js';
 import { redisEvents, getActiveRedisUrl } from '../redis/client.js';
-import { creditBackBatchQuota } from '../middleware/rateLimiter.js';
+import { refundQuota } from '../middleware/rateLimiter.js';
 
 function makeRedisConnection() {
   const url = getActiveRedisUrl();
@@ -86,7 +86,7 @@ export function startWorker(concurrency = 5) {
       // generate (non-batch) doesn't go through this code path. Detection: the
       // batch route is the only producer that sets `batchId` in job.data.
       if (job.data?.batchId && job.data?.userEmail) {
-        creditBackBatchQuota(job.data.userEmail, 1).catch(() => {});
+        refundQuota(job.data.userEmail, 1).catch(() => {});
       }
     }
   });

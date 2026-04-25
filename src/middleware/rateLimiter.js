@@ -1,5 +1,5 @@
 import { getRedis } from '../redis/client.js';
-import { getUser, incrementUserUsage } from '../db/users.js';
+import { getUser, incrementUserUsage, decrementUserUsage } from '../db/users.js';
 import { getDailyLimit } from '../config/plans.js';
 import { notifyQuotaWarning } from '../services/notifications.js';
 import { getDefaultPerMin, getPlanDailyLimit } from '../redis/systemConfig.js';
@@ -179,12 +179,15 @@ const CREDIT_BACK_LUA = `
 
 /**
  * Credit back `count` units of quota to a user (per-min AND per-day counters).
- * Floors at 0 to avoid negative counters. No-op on Redis errors — the worst
- * case is the user is charged for a failed batch job, which matches today's
- * (buggy) behaviour and is non-critical.
+ * Floors at 0 to avoid negative counters. Also decrements MongoDB usage count.
  */
-export async function creditBackBatchQuota(email, count = 1) {
+export async function refundQuota(email, count = 1) {
   if (!email || !Number.isFinite(count) || count <= 0) return;
+  
+  // Refund MongoDB (total count)
+  decrementUserUsage(email, count);
+
+  // Refund Redis (rate limits)
   try {
     const minKey = `rate:${email}:min`;
     const dayKey = `rate:${email}:day`;
