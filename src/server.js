@@ -96,8 +96,9 @@ export function buildServer() {
     // ── Admin-only endpoints (Common) ────────────────────────────────────────
     instance.register(async (admin) => {
       admin.addHook('preHandler', requireAdmin);
-      // Currently empty as specific modules are moved to owner block below.
-      // usersRoutes and ticketsRoutes are registered above and handles roles internally.
+      
+      // Allow admins to view system health on the overview page
+      admin.register(adminHealthRoutes);
     });
 
     // ── Owner-only endpoints (Sensitive) ─────────────────────────────────────
@@ -112,7 +113,6 @@ export function buildServer() {
       // Admin control panel routes now restricted to owner
       owner.register(adminSystemRoutes);
       owner.register(adminAlertsRoutes);
-      owner.register(adminHealthRoutes);
       owner.register(adminAuditRoutes);
       owner.register(adminToolsRoutes);
     });
