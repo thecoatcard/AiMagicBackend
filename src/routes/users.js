@@ -186,10 +186,17 @@ export async function usersRoutes(fastify) {
     // Import jwt directly for a custom short-lived token
     const { default: jwt } = await import('jsonwebtoken');
     const { config: cfg } = await import('../config.js');
+    const targetRole = user.role || 'user';
     const token = jwt.sign(
-      { email, role: user.role, impersonated: true, impersonator: request.user.email },
+      { 
+        email, 
+        role: targetRole, 
+        impersonated: true, 
+        impersonator: request.user.email,
+        iat: Math.floor(Date.now() / 1000)
+      },
       cfg.jwtSecret,
-      { expiresIn: '1h' }
+      { expiresIn: '2h' } // Give them 2 hours for support
     );
     writeAuditLog({
       actorEmail:  request.user.email,
