@@ -13,7 +13,7 @@ export const config = {
   defaultModel: process.env.DEFAULT_MODEL || 'gemini-3.1-flash-lite-preview',
   cooldownMs: parseInt(process.env.COOLDOWN_MS || '60000', 10),
   maxRetries: parseInt(process.env.MAX_RETRIES || '8', 10),
-  requestTimeoutMs: parseInt(process.env.REQUEST_TIMEOUT_MS || '100000', 10),
+  requestTimeoutMs: parseInt(process.env.REQUEST_TIMEOUT_MS || '180000', 10),
   mongodbUri: process.env.MONGODB_URI || 'mongodb://localhost:27017',
   mongodbName: process.env.MONGODB_NAME || 'keymanagement',
   workerConcurrency: parseInt(process.env.WORKER_CONCURRENCY || '1', 10),
@@ -41,7 +41,7 @@ export const config = {
 
   // Hivemind — per-user embedding context (dedicated Redis)
   hivemindRedisUrl: process.env.HIVEMIND_REDIS_URL || '',
-  hivemindTtlSecs: parseInt(process.env.HIVEMIND_TTL_SECS || '14400', 10), // 4 hours
+  hivemindTtlSecs: parseInt(process.env.HIVEMIND_TTL_SECS || '7200', 10), // 2 hours
   hivemindTopK: parseInt(process.env.HIVEMIND_TOP_K || '5', 10),
   hivemindEmbeddingModel: process.env.HIVEMIND_EMBEDDING_MODEL || 'gemini-embedding-2-preview',
   hivemindMaxSnippetLen: parseInt(process.env.HIVEMIND_MAX_SNIPPET_LEN || '500', 10),
