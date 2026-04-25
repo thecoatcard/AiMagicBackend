@@ -361,49 +361,70 @@ export async function streamRoutes(fastify) {
                   const dataObj = JSON.parse(line.slice(6));
                   let parts = dataObj?.candidates?.[0]?.content?.parts;
                   
-                  if (parts && parts.length > 0 && typeof parts[0].text === 'string') {
-                    const txt = parts[0].text;
-                    let newTxt = txt;
-                    let startIdx = -1;
+                  if (parts && parts.length > 0) {
+                    const originalLength = parts.length;
                     
-                    if (!inThoughtBlock) {
-                      startIdx = Math.max(
-                        txt.indexOf('<|channel>thought'),
-                        txt.indexOf('<think>'),
-                        txt.indexOf('<thought>')
-                      );
-                      if (startIdx !== -1) inThoughtBlock = true;
+                    // 1. Natively strip any parts marked as thought
+                    parts = parts.filter(p => !p.thought);
+                    
+                    if (parts.length === 0) {
+                      // If the chunk was ONLY thoughts, drop it entirely
+                      modified = true;
+                      continue;
                     }
 
-                    if (inThoughtBlock) {
-                      let endIdx = -1;
-                      let tagLen = 0;
+                    // 2. Fallback text-based regex stripping for Gemma 4 text streams
+                    let txtModified = false;
+                    if (typeof parts[0].text === 'string') {
+                      const txt = parts[0].text;
+                      let newTxt = txt;
+                      let startIdx = -1;
                       
-                      const e1 = txt.indexOf('<channel|>');
-                      if (e1 !== -1) { endIdx = e1; tagLen = 10; }
-                      const e2 = txt.indexOf('</think>');
-                      if (e2 !== -1 && (endIdx === -1 || e2 < endIdx)) { endIdx = e2; tagLen = 8; }
-                      const e3 = txt.indexOf('</thought>');
-                      if (e3 !== -1 && (endIdx === -1 || e3 < endIdx)) { endIdx = e3; tagLen = 10; }
+                      if (!inThoughtBlock) {
+                        startIdx = Math.max(
+                          txt.indexOf('<|channel>thought'),
+                          txt.indexOf('<think>'),
+                          txt.indexOf('<thought>')
+                        );
+                        if (startIdx !== -1) inThoughtBlock = true;
+                      }
 
-                      if (endIdx !== -1) {
-                        inThoughtBlock = false;
-                        if (startIdx !== -1) {
-                          newTxt = txt.slice(0, startIdx) + txt.slice(endIdx + tagLen);
+                      if (inThoughtBlock) {
+                        let endIdx = -1;
+                        let tagLen = 0;
+                        
+                        const e1 = txt.indexOf('<channel|>');
+                        if (e1 !== -1) { endIdx = e1; tagLen = 10; }
+                        const e2 = txt.indexOf('</think>');
+                        if (e2 !== -1 && (endIdx === -1 || e2 < endIdx)) { endIdx = e2; tagLen = 8; }
+                        const e3 = txt.indexOf('</thought>');
+                        if (e3 !== -1 && (endIdx === -1 || e3 < endIdx)) { endIdx = e3; tagLen = 10; }
+
+                        if (endIdx !== -1) {
+                          inThoughtBlock = false;
+                          if (startIdx !== -1) {
+                            newTxt = txt.slice(0, startIdx) + txt.slice(endIdx + tagLen);
+                          } else {
+                            newTxt = txt.slice(endIdx + tagLen);
+                          }
                         } else {
-                          newTxt = txt.slice(endIdx + tagLen);
+                          if (startIdx !== -1) {
+                            newTxt = txt.slice(0, startIdx);
+                          } else {
+                            newTxt = '';
+                          }
                         }
-                      } else {
-                        if (startIdx !== -1) {
-                          newTxt = txt.slice(0, startIdx);
-                        } else {
-                          newTxt = '';
-                        }
+                      }
+
+                      if (newTxt !== txt) {
+                        parts[0].text = newTxt;
+                        txtModified = true;
                       }
                     }
 
-                    if (newTxt !== txt) {
-                      parts[0].text = newTxt;
+                    // Re-serialize the chunk if we stripped any parts or text
+                    if (txtModified || parts.length !== originalLength) {
+                      dataObj.candidates[0].content.parts = parts;
                       newLines.push('data: ' + JSON.stringify(dataObj));
                       modified = true;
                       continue;
