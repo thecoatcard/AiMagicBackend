@@ -338,14 +338,92 @@ export async function streamRoutes(fastify) {
 
       let streamStatus = 'success';
       let streamedText = '';  // Accumulate for hivemind storage
+      let inThoughtBlock = false;
+      const isGemma4 = currentModel.startsWith('gemma-4');
+
       try {
         for await (const chunk of result.bodyStream) {
           if (res.writableEnded) break;
           if (!chunk || chunk.length === 0) continue;
 
+          let outputChunk = chunk;
+
+          // Strip Gemma 4 / DeepSeek thinking blocks natively on the backend stream
+          if (isGemma4) {
+            const strChunk = chunk.toString();
+            const lines = strChunk.split('\n');
+            let modified = false;
+            let newLines = [];
+            
+            for (const line of lines) {
+              if (line.startsWith('data: ') && line.trim() !== 'data: [DONE]') {
+                try {
+                  const dataObj = JSON.parse(line.slice(6));
+                  let parts = dataObj?.candidates?.[0]?.content?.parts;
+                  
+                  if (parts && parts.length > 0 && typeof parts[0].text === 'string') {
+                    const txt = parts[0].text;
+                    let newTxt = txt;
+                    let startIdx = -1;
+                    
+                    if (!inThoughtBlock) {
+                      startIdx = Math.max(
+                        txt.indexOf('<|channel>thought'),
+                        txt.indexOf('<think>'),
+                        txt.indexOf('<thought>')
+                      );
+                      if (startIdx !== -1) inThoughtBlock = true;
+                    }
+
+                    if (inThoughtBlock) {
+                      let endIdx = -1;
+                      let tagLen = 0;
+                      
+                      const e1 = txt.indexOf('<channel|>');
+                      if (e1 !== -1) { endIdx = e1; tagLen = 10; }
+                      const e2 = txt.indexOf('</think>');
+                      if (e2 !== -1 && (endIdx === -1 || e2 < endIdx)) { endIdx = e2; tagLen = 8; }
+                      const e3 = txt.indexOf('</thought>');
+                      if (e3 !== -1 && (endIdx === -1 || e3 < endIdx)) { endIdx = e3; tagLen = 10; }
+
+                      if (endIdx !== -1) {
+                        inThoughtBlock = false;
+                        if (startIdx !== -1) {
+                          newTxt = txt.slice(0, startIdx) + txt.slice(endIdx + tagLen);
+                        } else {
+                          newTxt = txt.slice(endIdx + tagLen);
+                        }
+                      } else {
+                        if (startIdx !== -1) {
+                          newTxt = txt.slice(0, startIdx);
+                        } else {
+                          newTxt = '';
+                        }
+                      }
+                    }
+
+                    if (newTxt !== txt) {
+                      parts[0].text = newTxt;
+                      newLines.push('data: ' + JSON.stringify(dataObj));
+                      modified = true;
+                      continue;
+                    }
+                  }
+                } catch (e) {
+                  // Fall through to push original line on parse error
+                }
+              }
+              newLines.push(line);
+            }
+
+            if (modified) {
+              outputChunk = Buffer.from(newLines.join('\n'));
+            }
+          }
+
           // Capture text for hivemind (lightweight — only first 300 chars)
           if (streamedText.length < 300) {
-            const str = chunk.toString();
+            const str = outputChunk.toString();
             // Extract text from SSE data lines: data: {"candidates":[{"content":{"parts":[{"text":"..."}]}}]}
             const matches = str.matchAll(/"text"\s*:\s*"((?:[^"\\]|\\.)*)"/g);
             for (const m of matches) {
@@ -356,7 +434,7 @@ export async function streamRoutes(fastify) {
           }
 
           // write() returns false when kernel send-buffer is full (backpressure).
-          const ok = res.write(chunk);
+          const ok = res.write(outputChunk);
           if (!ok) {
             await new Promise((resolve) => {
               const onDrain = () => { cleanup(); resolve(); };

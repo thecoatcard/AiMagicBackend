@@ -156,7 +156,15 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
       requestsTotal.inc({ model: currentModel, status: 'success' });
       requestDuration.observe({ model: currentModel }, Date.now() - wallStart);
       if (retries > 0) retriesTotal.inc({ model: currentModel }, retries);
-      const responseText = result.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      const parts = result.data?.candidates?.[0]?.content?.parts || [];
+      let responseText = parts
+        .filter(p => !p.thought)
+        .map(p => p.text || '')
+        .join('') || '';
+      
+      if (currentModel.startsWith('gemma-4')) {
+        responseText = responseText.replace(/(?:<\|channel>thought|<(?:think|thought)>)[\s\S]*?(?:<channel\|>|<\/(?:think|thought)>|$)/gi, '').trim();
+      }
 
       // ── Hivemind: store prompt+response for future context retrieval ────
       if (hivemindRuntimeOn && isHivemindEnabled() && userEmail && prompt && responseText) {
