@@ -467,13 +467,14 @@ export async function streamRoutes(fastify) {
               res.once('drain', onDrain);
               res.once('close', onClose);
             });
-            if (res.writableEnded) break;
+            if (res.destroyed || res.writableEnded) break;
           }
         }
       } catch (streamErr) {
         streamStatus = 'error';
-        if (!res.writableEnded) {
-          res.write(`data: ${JSON.stringify({ error: 'Stream interrupted', code: 'STREAM_ERROR' })}\n\n`);
+        if (!res.destroyed && !res.writableEnded) {
+          const errMsg = streamErr.message || 'Unknown stream error';
+          res.write(`data: ${JSON.stringify({ error: `Stream interrupted: ${errMsg}`, code: 'STREAM_ERROR' })}\n\n`);
         }
       } finally {
         if (!res.writableEnded) res.end();

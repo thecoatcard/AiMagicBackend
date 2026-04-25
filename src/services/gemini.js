@@ -76,7 +76,6 @@ export async function streamGenerateContent(key, model, prompt, options = {}) {
         'x-goog-api-key': key
       },
       body,
-      signal: AbortSignal.timeout(config.requestTimeoutMs),
     }));
   } catch (err) {
     if (isTimeoutError(err)) {
