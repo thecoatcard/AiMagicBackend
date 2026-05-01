@@ -5,6 +5,7 @@ import { upsertApiKey, removeApiKey as removeKeyFromDb, getAllApiKeys } from '..
 import { createHash } from 'crypto';
 
 const KEY_POOL_LOW_THRESHOLD = parseInt(process.env.KEY_POOL_LOW_THRESHOLD || '5', 10);
+const AUTO_RESTORE_THRESHOLD = parseInt(process.env.AUTO_RESTORE_THRESHOLD || '30', 10);
 
 const ACTIVE_LIST = 'gemini_keys';
 const COOLDOWN_ZSET = 'gemini_keys_cooldown';
@@ -141,6 +142,17 @@ export async function disableKey(key, reason = 'unknown') {
 
 async function checkPoolLow(redis) {
   const activeCount = await redis.llen(ACTIVE_LIST);
+
+  // 1. Auto-reactivate temporary cooldowns if pool is running low (FIX-5)
+  // This helps maintain availability during traffic spikes or transient errors.
+  if (activeCount <= AUTO_RESTORE_THRESHOLD) {
+    const restored = await clearAllCooldowns();
+    if (restored > 0) {
+      console.info(`[keyPool] Auto-restored ${restored} keys (active count: ${activeCount})`);
+    }
+  }
+
+  // 2. Alert admin if pool is critically low
   if (activeCount <= KEY_POOL_LOW_THRESHOLD) {
     notifyAdminKeyPoolLow({ activeCount, threshold: KEY_POOL_LOW_THRESHOLD });
   }
