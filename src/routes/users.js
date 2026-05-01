@@ -9,6 +9,7 @@ import {
   setUserLimits,
   setUserPlan,
   deleteUser,
+  setAllowPreviousOtp,
 } from '../db/users.js';
 import { requireAdmin, requireOwner } from '../auth/roles.js';
 import { invalidateUserLimitsCache } from '../middleware/rateLimiter.js';
@@ -34,6 +35,23 @@ export async function usersRoutes(fastify) {
       role:   request.user.role,
       status: 'active',
     };
+  });
+
+  // ── PATCH /v1/users/me/otp-settings — toggle previous OTP support ─────────
+  fastify.patch('/v1/users/me/otp-settings', {
+    schema: {
+      body: {
+        type: 'object',
+        required: ['enabled'],
+        properties: {
+          enabled: { type: 'boolean' },
+        },
+      },
+    },
+  }, async (request) => {
+    const { enabled } = request.body;
+    await setAllowPreviousOtp(request.user.email, enabled);
+    return { updated: true, allow_previous_otp: enabled };
   });
 
   // ── GET /v1/users — list all users with search/filter (admin only) ───────────

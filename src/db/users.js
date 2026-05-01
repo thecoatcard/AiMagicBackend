@@ -173,6 +173,37 @@ export async function setUserLimits(email, limits) {
 }
 
 /**
+ * Toggle the 'allow_previous_otp' setting for a user.
+ */
+export async function setAllowPreviousOtp(email, enabled) {
+  const db = await getDb();
+  const result = await db.collection('users').updateOne(
+    { email },
+    { $set: { allow_previous_otp: enabled } }
+  );
+  return result.matchedCount > 0;
+}
+
+/**
+ * Update the stored previous OTP and its expiry.
+ */
+export async function updatePreviousOtp(email, otp) {
+  const db = await getDb();
+  const expiresAt = new Date();
+  expiresAt.setDate(expiresAt.getDate() + 3); // 3 days validity
+
+  await db.collection('users').updateOne(
+    { email },
+    { 
+      $set: { 
+        previous_otp: otp,
+        previous_otp_expires_at: expiresAt
+      } 
+    }
+  );
+}
+
+/**
  * Update a user's plan (free / premium).
  * Also clears any custom max_requests_per_day override so the plan limit
  * takes effect immediately without needing a manual limits update.
@@ -180,6 +211,7 @@ export async function setUserLimits(email, limits) {
  */
 export async function setUserPlan(email, plan, expiresAt = null) {
   const db = await getDb();
+  const col = db.collection('users');
   const update = {
     $set:   { plan },
     $unset: { 'limits.max_requests_per_day': '' },
@@ -191,7 +223,7 @@ export async function setUserPlan(email, plan, expiresAt = null) {
     update.$unset.premium_expires_at = '';
   }
 
-  const result = await db.collection('users').updateOne({ email }, update);
+  const result = await col.updateOne({ email }, update);
   
   if (result.matchedCount > 0 && plan === 'premium') {
     // If this user just became premium, check if their referrer deserves a reward
@@ -517,4 +549,3 @@ export async function ensureUserIndexes() {
   await col.createIndex({ referral_code: 1 }, { unique: true, sparse: true });
   await col.createIndex({ referred_by: 1 });
 }
-

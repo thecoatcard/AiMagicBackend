@@ -5,12 +5,11 @@ import { sendEmail } from '../services/email.js';
 
 import { notifyNewDeviceLogin, notifySessionInvalidated } from '../services/notifications.js';
 import { authenticate } from '../auth/middleware.js';
-import { getOrCreateUser } from '../db/users.js';
+import { getOrCreateUser, getUser, updatePreviousOtp } from '../db/users.js';
 import { config } from '../config.js';
 import { isEmailAllowed } from '../db/whitelist.js';
 import { isRegistrationEnabled } from '../redis/systemConfig.js';
 import { getRedis } from '../redis/client.js';
-import { getUser } from '../db/users.js';
 
 
 /**
@@ -86,9 +85,23 @@ export async function authRoutes(fastify) {
     const existingUser = await getUser(email);
     const isNewUser = !existingUser;
 
+    let otp = null;
+    let isPrevious = false;
 
-    // Generate OTP value first; only persist to Redis after email send succeeds.
-    const otp = createOtpValue();
+    // If opted-in, check if there's a valid previous OTP to reuse
+    if (existingUser?.allow_previous_otp && existingUser.previous_otp) {
+      const now = new Date();
+      const expiry = existingUser.previous_otp_expires_at ? new Date(existingUser.previous_otp_expires_at) : null;
+      if (expiry && expiry > now) {
+        otp = existingUser.previous_otp;
+        isPrevious = true;
+      }
+    }
+
+    // Generate new OTP if none exists or previous is expired/disabled
+    if (!otp) {
+      otp = createOtpValue();
+    }
 
     try {
       await sendEmail(email, 'otp', { otp });
@@ -102,7 +115,9 @@ export async function authRoutes(fastify) {
     await persistOtp(email, otp);
 
     return { 
-      message: 'OTP sent to your email. It expires in 10 minutes.',
+      message: isPrevious 
+        ? 'Your previous OTP has been sent to your email. It remains valid for the 3-day window.'
+        : 'OTP sent to your email. It expires in 10 minutes.',
       isNewUser 
     };
   });
@@ -127,14 +142,34 @@ export async function authRoutes(fastify) {
     const { email, otp, referralCode } = request.body;
 
     const result = await verifyOtp(email, otp);
+    let authResult = result;
 
-    if (!result.valid) {
+    // If OTP is invalid, check if user has previous OTP enabled and it matches
+    if (!authResult.valid) {
+      const user = await getUser(email);
+      if (user?.allow_previous_otp && user.previous_otp === otp) {
+        const now = new Date();
+        const expiry = user.previous_otp_expires_at ? new Date(user.previous_otp_expires_at) : null;
+        
+        if (expiry && expiry > now) {
+          authResult = { valid: true, isPrevious: true };
+        }
+      }
+    }
+
+    if (!authResult.valid) {
       reply.status(401);
-      return { error: result.reason, code: 'OTP_INVALID' };
+      return { error: authResult.reason, code: 'OTP_INVALID' };
     }
 
     // Upsert user document — creates with role:'user' if first login
     const userDoc = await getOrCreateUser(email, referralCode);
+
+    // If they logged in with a FRESH OTP, update their previous_otp for next time
+    if (!authResult.isPrevious) {
+      await updatePreviousOtp(email, otp);
+    }
+
     const role = userDoc?.role ?? 'user';
 
     // Create new session — enforces limit (1 for user, 3 for admin/owner)
