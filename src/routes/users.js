@@ -104,11 +104,12 @@ export async function usersRoutes(fastify) {
           emails: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 100 },
           action: { type: 'string', enum: ['block', 'unblock', 'set_plan'] },
           plan:   { type: 'string', enum: ASSIGNABLE_PLANS },
+          duration: { type: 'string', enum: ['1w', '1m'], default: '1m' },
         },
       },
     },
   }, async (request, reply) => {
-    const { emails, action, plan } = request.body;
+    const { emails, action } = request.body;
 
     // Prevent operating on own account or owner account
     const safeEmails = emails.filter(e => e !== request.user.email && e !== config.ownerEmail);
@@ -125,6 +126,7 @@ export async function usersRoutes(fastify) {
     } else if (action === 'unblock') {
       result = await bulkUpdateUsers(safeEmails, { status: 'active' });
     } else if (action === 'set_plan') {
+      const { plan, duration = '1m' } = request.body;
       if (!plan) {
         reply.status(400);
         return { error: 'plan is required for set_plan action', code: 'MISSING_PLAN' };
@@ -132,11 +134,11 @@ export async function usersRoutes(fastify) {
 
       if (plan === 'premium') {
         // Per-user iteration so we can EXTEND existing premium expiry
-        // by 30 days instead of truncating it. Mirrors single-user setUserPlan.
+        // by the selected duration instead of truncating it.
         let matched = 0;
         let modified = 0;
         const now = Date.now();
-        const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+        const durationMs = duration === '1w' ? 7 * 24 * 60 * 60 * 1000 : 30 * 24 * 60 * 60 * 1000;
         for (const email of safeEmails) {
           const existing = await getUser(email);
           if (!existing) continue;
@@ -146,7 +148,7 @@ export async function usersRoutes(fastify) {
           const base = (existing.plan === 'premium' && currentExpiry > now)
             ? currentExpiry
             : now;
-          const newExpiry = new Date(base + THIRTY_DAYS_MS);
+          const newExpiry = new Date(base + durationMs);
           const ok = await setUserPlan(email, 'premium', newExpiry);
           if (ok) { matched += 1; modified += 1; }
         }
@@ -168,7 +170,7 @@ export async function usersRoutes(fastify) {
     writeAuditLog({
       actorEmail: request.user.email,
       action:     `bulk_${action}`,
-      meta:       { emails: safeEmails, plan },
+      meta:       { emails: safeEmails, ...request.body },
     });
 
     return { ...result, action, emails: safeEmails };
@@ -333,19 +335,24 @@ export async function usersRoutes(fastify) {
         required: ['plan'],
         properties: {
           plan: { type: 'string', enum: ASSIGNABLE_PLANS },
+          duration: { type: 'string', enum: ['1w', '1m'], default: '1m' },
         },
       },
     },
   }, async (request, reply) => {
     const email = decodeURIComponent(request.params.email);
-    const { plan } = request.body;
+    const { plan, duration = '1m' } = request.body;
     // Fetch old plan before overwriting so the notification shows the change
     const existingUser = await getUser(email);
     
     let expiresAt = null;
     if (plan === 'premium') {
       expiresAt = new Date();
-      expiresAt.setDate(expiresAt.getDate() + 30);
+      if (duration === '1w') {
+        expiresAt.setDate(expiresAt.getDate() + 7);
+      } else {
+        expiresAt.setDate(expiresAt.getDate() + 30);
+      }
     }
 
     const found = await setUserPlan(email, plan, expiresAt);
@@ -359,12 +366,13 @@ export async function usersRoutes(fastify) {
       oldPlan:  existingUser?.plan ?? 'free',
       newPlan:  plan,
       newLimit: await getPlanDailyLimit(plan),
+      expiresAt,
     });
     writeAuditLog({ 
       actorEmail: request.user.email, 
       action: 'change_plan', 
       targetEmail: email, 
-      meta: { old_plan: existingUser?.plan ?? 'free', new_plan: plan } 
+      meta: { old_plan: existingUser?.plan ?? 'free', new_plan: plan, duration } 
     });
     return { updated: true, email, plan, premium_expires_at: expiresAt };
   });

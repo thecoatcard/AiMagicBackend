@@ -41,13 +41,13 @@ export async function notifySessionInvalidated(email) {
   send(email, 'sessionInvalidated', { email });
 }
 
-/** Sent when an admin blocks a user's account. */
+/** Sent when a user is blocked by an admin. */
 export async function notifyAccountBlocked(email) {
   if (await getSystemConfig('email_status_enabled') === '0') return;
   send(email, 'accountBlocked', { email });
 }
 
-/** Sent when an admin reinstates a blocked account. */
+/** Sent when a user is unblocked by an admin. */
 export async function notifyAccountUnblocked(email) {
   if (await getSystemConfig('email_status_enabled') === '0') return;
   send(email, 'accountUnblocked', { email });
@@ -56,11 +56,11 @@ export async function notifyAccountUnblocked(email) {
 /**
  * Sent when an admin changes a user's plan.
  */
-export async function notifyPlanChanged(email, { oldPlan, newPlan, newLimit }) {
+export async function notifyPlanChanged(email, { oldPlan, newPlan, newLimit, expiresAt }) {
   if (await getSystemConfig('email_status_enabled') === '0') return;
   const PLAN_ORDER = ['free', 'premium'];
   const isUpgrade = PLAN_ORDER.indexOf(newPlan) > PLAN_ORDER.indexOf(oldPlan);
-  send(email, 'planChanged', { email, oldPlan, newPlan, newLimit, isUpgrade });
+  send(email, 'planChanged', { email, oldPlan, newPlan, newLimit, isUpgrade, expiresAt });
 }
 
 /**
