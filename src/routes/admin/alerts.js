@@ -148,9 +148,14 @@ async function triggerDailySummary() {
     { $limit: 1 },
   ]).next();
 
-  const [activeKeys, totalUsers] = await Promise.all([
+  const [activeKeys, totalUsers, usersJoined, planChanges] = await Promise.all([
     redis.llen('gemini_keys'),
     db.collection('users').countDocuments(),
+    db.collection('users').countDocuments({ created_at: { $gte: startUtc, $lt: endUtc } }),
+    db.collection('audit_log').countDocuments({
+      action: { $in: ['change_plan', 'bulk_set_plan'] },
+      created_at: { $gte: startUtc, $lt: endUtc }
+    }),
   ]);
 
   notifyAdminDailySummary({
@@ -162,6 +167,8 @@ async function triggerDailySummary() {
     maxLatencyMs:    stats?.maxLatencyMs    ?? 0,
     activeKeys,
     totalUsers,
+    usersJoined,
+    planChanges,
     topModel:        topModelDoc?._id ?? null,
   });
 }

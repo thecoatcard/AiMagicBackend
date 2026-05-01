@@ -142,12 +142,11 @@ export async function saveSnapshotToMongo(renamedKeys) {
   const redis = getRedis();
   const rateLimits = {};
 
-  // Helper: extract email/identifier from a rate key. Handles both
-  // live keys (`rate:<id>:day`) and rotated keys (`rate:<id>:day:rotating:<date>`).
+  // Helper: extract email/identifier from a rate key.
   const extractId = (k) => {
     const rotIdx = k.indexOf(':day:rotating:');
-    const end = rotIdx === -1 ? k.length - 4 /* strip ":day" */ : rotIdx;
-    return k.slice(5, end); // strip leading "rate:"
+    const end = rotIdx === -1 ? k.length - 4 : rotIdx;
+    return k.slice(5, end);
   };
 
   const readKeys = async (keys) => {
@@ -163,10 +162,8 @@ export async function saveSnapshotToMongo(renamedKeys) {
   };
 
   if (Array.isArray(renamedKeys)) {
-    // Read directly from the frozen rotated namespace (FIX-1, no race)
     await readKeys(renamedKeys);
   } else {
-    // Legacy path: scan live namespace
     let cursor = '0';
     do {
       const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', 'rate:*:day', 'COUNT', 200);
@@ -175,7 +172,15 @@ export async function saveSnapshotToMongo(renamedKeys) {
     } while (cursor !== '0');
   }
 
-  // 4. Upsert snapshot document (idempotent — safe to run multiple times)
+  // 4. Snapshot meta counts from Mongo (FIX-4)
+  const { startUtc, endUtc } = getYesterdayBoundsIST();
+  const usersJoined = await db.collection('users').countDocuments({ created_at: { $gte: startUtc, $lt: endUtc } });
+  const planChanges = await db.collection('audit_log').countDocuments({
+    action: { $in: ['change_plan', 'bulk_set_plan'] },
+    created_at: { $gte: startUtc, $lt: endUtc }
+  });
+
+  // 5. Upsert snapshot document
   await db.collection(SNAPSHOT_COLLECTION).updateOne(
     { _id: date },
     {
@@ -184,6 +189,8 @@ export async function saveSnapshotToMongo(renamedKeys) {
         model_health: modelHealth,
         key_stats: keyStats,
         daily_usage: rateLimits,
+        users_joined: usersJoined,
+        plan_changes: planChanges,
         snapshot_at: new Date(),
       },
     },
@@ -191,7 +198,7 @@ export async function saveSnapshotToMongo(renamedKeys) {
   );
 
   console.info(`[DailySnapshot] Saved snapshot for ${date}`);
-  return { date, models: modelHealth.length, keys: Object.keys(keyStats).length, users: Object.keys(rateLimits).length };
+  return { date, models: modelHealth.length, keys: Object.keys(keyStats).length, users: Object.keys(rateLimits).length, usersJoined, planChanges };
 }
 
 /**
