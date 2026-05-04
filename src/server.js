@@ -26,6 +26,8 @@ import { adminAlertsRoutes } from './routes/admin/alerts.js';
 import { adminHealthRoutes } from './routes/admin/health.js';
 import { adminAuditRoutes } from './routes/admin/audit.js';
 import { adminToolsRoutes } from './routes/admin/tools.js';
+import { adminAnnouncementsRoutes } from './routes/admin/announcements.js';
+import { announcementsRoutes } from './routes/announcements.js';
 import { referralRoutes } from './routes/referrals.js';
 
 
@@ -91,6 +93,7 @@ export function buildServer() {
     // models — listing available models is public for chat settings; admin routes protected inline
     instance.register(modelsRoutes);
     instance.register(referralRoutes);
+    instance.register(announcementsRoutes);
 
 
     // ── Admin-only endpoints (Common) ────────────────────────────────────────
@@ -115,6 +118,7 @@ export function buildServer() {
       owner.register(adminAlertsRoutes);
       owner.register(adminAuditRoutes);
       owner.register(adminToolsRoutes);
+      owner.register(adminAnnouncementsRoutes);
     });
   });
 
