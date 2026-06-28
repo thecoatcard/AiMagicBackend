@@ -72,6 +72,20 @@ describe('Auth Integration', () => {
       expect(body).toHaveProperty('code', 'OTP_INVALID');
     });
 
+    it('should reject and return too_many_attempts when locked out', async () => {
+      const { verifyOtp } = await import('../../src/auth/otp.js');
+      verifyOtp.mockImplementationOnce(async () => ({ valid: false, reason: 'too_many_attempts' }));
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/auth/verify',
+        payload: { email: 'user@test.com', otp: '123456' },
+      });
+      expect(res.statusCode).toBe(401);
+      const body = res.json();
+      expect(body.error).toBe('too_many_attempts');
+    });
+
     it('should reject non-6-digit otp with 400', async () => {
       const res = await app.inject({
         method: 'POST',

@@ -158,17 +158,23 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
       if (retries > 0) retriesTotal.inc({ model: currentModel }, retries);
       const parts = result.data?.candidates?.[0]?.content?.parts || [];
       let responseText = parts
-        .filter(p => !p.thought)
+        .filter(p => !p.thought && !p.inlineData)
         .map(p => p.text || '')
         .join('') || '';
       
-      if (currentModel.startsWith('gemma-4')) {
+      const audioParts = parts.filter(p => p.inlineData?.mimeType?.startsWith('audio/'));
+      const audioData = audioParts.length > 0 ? audioParts[0].inlineData.data : null;
+      const audioMimeType = audioParts.length > 0 ? audioParts[0].inlineData.mimeType : null;
+
+      const functionCalls = parts.filter(p => p.functionCall).map(p => p.functionCall);
+
+      if (currentModel && currentModel.startsWith('gemma-4')) {
         responseText = responseText.replace(/(?:<\|channel>thought|<(?:think|thought)>)[\s\S]*?(?:<channel\|>|<\/(?:think|thought)>|$)/gi, '').trim();
       }
 
       // ── Hivemind: store prompt+response for future context retrieval ────
-      if (hivemindRuntimeOn && isHivemindEnabled() && userEmail && prompt && responseText) {
-        const snippet = prompt.slice(0, 200) + '\n---\n' + responseText.slice(0, 300);
+      if (hivemindRuntimeOn && isHivemindEnabled() && userEmail && prompt && (responseText || audioData || functionCalls.length > 0)) {
+        const snippet = prompt.slice(0, 200) + '\n---\n' + (responseText || (functionCalls.length > 0 ? '[Function Call]' : '[Audio response]')).slice(0, 300);
         // Idempotency guard: BullMQ retries can dispatch the same logical
         // request twice. SET-NX on requestId prevents duplicate hivemind
         // entries (different UUIDs but identical content) for the same reqId.
@@ -186,6 +192,9 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
 
       return {
         text: responseText,
+        audio: audioData,
+        mimeType: audioMimeType,
+        functionCalls: functionCalls.length > 0 ? functionCalls : null,
         model: currentModel,
         usageMetadata: result.data?.usageMetadata,
         request_id: reqId,

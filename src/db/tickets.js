@@ -229,6 +229,7 @@ function serialize(doc) {
     subject:        doc.subject,
     priority:       doc.priority,
     status:         doc.status,
+    screenshot_id:  doc.screenshot_id ? doc.screenshot_id.toString() : null,
     messages:       (doc.messages || []).map(m => ({
       role:          m.role,
       text:          m.text,

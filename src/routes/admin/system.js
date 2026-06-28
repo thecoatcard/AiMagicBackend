@@ -238,7 +238,7 @@ export async function adminSystemRoutes(fastify) {
     const bucket = await getToolsBucket();
 
     // 1. Clean up old GridFS file if exists
-    if (cfg.payment_qr_file_id) {
+    if (cfg.payment_qr_file_id && ObjectId.isValid(cfg.payment_qr_file_id)) {
       try { await bucket.delete(new ObjectId(cfg.payment_qr_file_id)); } catch {}
     }
 
@@ -278,7 +278,7 @@ export async function adminSystemRoutes(fastify) {
     const bucket = await getToolsBucket();
 
     // 1. Clean up GridFS file if exists
-    if (cfg.payment_qr_file_id) {
+    if (cfg.payment_qr_file_id && ObjectId.isValid(cfg.payment_qr_file_id)) {
       try { await bucket.delete(new ObjectId(cfg.payment_qr_file_id)); } catch {}
     }
 

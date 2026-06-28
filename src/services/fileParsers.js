@@ -12,7 +12,7 @@ import * as XLSX from 'xlsx';
 export function parseFileToContent(file) {
   const { mimeType, data, name } = file;
 
-  if (mimeType === 'application/pdf') {
+  if (mimeType === 'application/pdf' || mimeType.startsWith('video/') || mimeType.startsWith('audio/')) {
     return { type: 'inlineData', mimeType, data };
   }
 

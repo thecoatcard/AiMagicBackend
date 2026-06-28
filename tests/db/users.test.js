@@ -182,7 +182,10 @@ describe('getUserStats()', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockDb.collection('users').countDocuments.mockResolvedValue(10);
-    mockDb.collection('users').aggregate.mockReturnValue({ toArray: vi.fn().mockResolvedValue([]) });
+    mockDb.collection('users').aggregate.mockReturnValue({
+      toArray: vi.fn().mockResolvedValue([]),
+      next: vi.fn().mockResolvedValue({ count: 0 }),
+    });
   });
 
   it('should return stats object', async () => {
@@ -201,5 +204,40 @@ describe('bulkUpdateUsers()', () => {
     const result = await bulkUpdateUsers(['a@t.com', 'b@t.com'], { status: 'blocked' });
     expect(result.matched).toBe(2);
     expect(result.modified).toBe(2);
+  });
+});
+
+import { giftPremium } from '../../src/db/users.js';
+
+describe('giftPremium()', () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it('should decrement giver and update receiver on success', async () => {
+    mockDb.collection('users').findOne.mockResolvedValue({ email: 'giver@test.com', plan: 'premium', gift_count: 2 });
+    mockDb.collection('users').updateOne.mockResolvedValue({ matchedCount: 1, modifiedCount: 1 });
+
+    const result = await giftPremium('giver@test.com', 'receiver@test.com');
+    expect(result).toBe(true);
+    // Two updateOne calls (one for giver, one for receiver)
+    expect(mockDb.collection('users').updateOne).toHaveBeenCalledTimes(2);
+  });
+
+  it('should rollback giver gift count on receiver update failure', async () => {
+    mockDb.collection('users').findOne.mockResolvedValue({ email: 'giver@test.com', plan: 'premium', gift_count: 2 });
+    // First updateOne (giver) succeeds; second updateOne (receiver) throws
+    mockDb.collection('users').updateOne
+      .mockResolvedValueOnce({ matchedCount: 1, modifiedCount: 1 })
+      .mockRejectedValueOnce(new Error('DB connection dropped'));
+
+    await expect(giftPremium('giver@test.com', 'receiver@test.com'))
+      .rejects.toThrow('DB connection dropped');
+
+    // Third updateOne call for rollback must be called
+    expect(mockDb.collection('users').updateOne).toHaveBeenCalledTimes(3);
+    // Rollback call should increment count back (+1)
+    expect(mockDb.collection('users').updateOne).toHaveBeenLastCalledWith(
+      { email: 'giver@test.com' },
+      { $inc: { gift_count: 1 } }
+    );
   });
 });

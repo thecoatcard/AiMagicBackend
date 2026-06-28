@@ -125,6 +125,11 @@ const handleShutdown = async (signal) => {
 process.on('SIGTERM', () => handleShutdown('SIGTERM'));
 process.on('SIGINT',  () => handleShutdown('SIGINT'));
 
+process.on('uncaughtException', (err) => {
+  server.log.error(err, '[Fatal] Uncaught Exception thrown');
+  handleShutdown('uncaughtException');
+});
+
 process.on('unhandledRejection', (reason, promise) => {
   server.log.error({ promise, reason }, '[Fatal] Unhandled Rejection at Promise');
 });

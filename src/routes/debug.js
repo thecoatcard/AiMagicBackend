@@ -1,9 +1,11 @@
 import { generateContent } from '../services/gemini.js';
 import { getKey, returnKey, cooldownKey } from '../redis/keyPool.js';
 import { config } from '../config.js';
+import { requireAdmin } from '../auth/roles.js';
 
 export async function debugRoutes(fastify) {
   fastify.post('/v1/debug/test-key', {
+    preHandler: requireAdmin,
     schema: {
       body: {
         type: 'object',
@@ -37,6 +39,7 @@ export async function debugRoutes(fastify) {
   });
 
   fastify.post('/v1/debug/test-model', {
+    preHandler: requireAdmin,
     schema: {
       body: {
         type: 'object',

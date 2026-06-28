@@ -8,6 +8,7 @@ import {
   getActiveFallbackModels,
   toggleFallbackModelStatus,
   getImageModels,
+  ALL_SUPPORTED_MODELS,
 } from '../redis/modelConfig.js';
 import { requireOwner } from '../auth/roles.js';
 
@@ -21,10 +22,11 @@ export async function modelsRoutes(fastify) {
       getActiveFallbackModels()
     ]);
     
-    // Combine models with health data + models in admin config chain
+    // Combine models with health data + models in admin config chain + all supported models
     const allModels = new Set([
       ...stats.map(s => s.model),
-      ...configModels
+      ...configModels,
+      ...ALL_SUPPORTED_MODELS
     ]);
 
     return { models: Array.from(allModels) };

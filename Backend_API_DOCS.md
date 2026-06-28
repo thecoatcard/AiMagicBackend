@@ -355,9 +355,9 @@ When a user's role is changed by the owner, their **session is immediately inval
 
 ### `POST /v1/generate`
 
-Send a prompt (text + optional images) and get a full response back (non-streaming).
+Send a prompt (text + optional images/files) or structured parts and get a full response back (non-streaming).
 
-Supports **system instructions**, **conversation history**, **multimodal images**, and **thinking models**.
+Supports **system instructions**, **conversation history** (with roles `user`, `model`, and `function`), **multimodal inputs** (images and videos), **thinking models**, **audio modalities**, and **agentic tool configurations** (for Function Calling / Computer Use).
 
 **Authentication required. Rate-limited.**
 
@@ -368,18 +368,23 @@ Supports **system instructions**, **conversation history**, **multimodal images*
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `prompt` | string | ❌ * | The user's input text |
-| `images` | array | ❌ * | Image parts (see below). Required if no prompt |
-| `files` | array | ❌ | Document parts (PDF, Excel, CSV). Max 5 per request |
+| `images` | array | ❌ * | Image parts (see below). Required if no prompt/files/parts |
+| `files` | array | ❌ * | Document/video parts (PDF, Excel, CSV, MP4, WebM, QuickTime). Max 5 |
+| `parts` | array | ❌ * | Raw Gemini parts list. Bypasses prompt/images/files fields |
 | `model` | string | ❌ | Override model. Defaults to best available |
 | `temperature` | number (0–2) | ❌ | Creativity. Default: 1 |
 | `maxOutputTokens` | integer | ❌ | Max response length. Default: 8192 |
 | `systemInstruction` | string (1–8192 chars) | ❌ | Sets the model's persona or behavior before any user turn |
-| `history` | array | ❌ | Prior conversation turns for multi-turn chat |
+| `history` | array | ❌ | Prior conversation turns for multi-turn chat. Supports structured `parts` |
 | `thinkingBudget` | integer (0–24576) | ❌ | Token budget for model reasoning. `0` disables thinking |
+| `responseModalities` | array | ❌ | Output types requested, e.g. `["AUDIO"]` or `["TEXT"]` |
+| `speechConfig` | object | ❌ | Configuration for text-to-speech voice configs (e.g. choice of voiceName) |
+| `tools` | array | ❌ | Tool/function calling declarations (e.g. screen actions for Computer Use) |
+| `toolConfig` | object | ❌ | Direct config constraints for tool/function execution route |
 
-> \* At least one of `prompt` or `images` must be provided.
+> \* At least one of `prompt`, `images`, `files`, or `parts` must be provided.
 >
-> `files[]` accepts base64-encoded PDF, Excel (`.xlsx`/`.xls`), or CSV documents.
+> `files[]` accepts base64-encoded PDF, Excel (`.xlsx`/`.xls`), CSV documents, as well as recorded video formats (`video/mp4`, `video/webm`, `video/quicktime`).
 > Each entry must include `mimeType`, `data` (base64), and `name`. Maximum **5 files** per request.
 
 ---
@@ -402,21 +407,21 @@ Supports **system instructions**, **conversation history**, **multimodal images*
 }
 ```
 
-#### Multi-turn conversation (chat history)
+#### Multi-turn conversation (chat history with function call resolution)
 ```json
 {
-  "systemInstruction": "You are a friendly math tutor.",
+  "systemInstruction": "You are a friendly computer automation assistant.",
   "history": [
-    { "role": "user",  "text": "What is a derivative?" },
-    { "role": "model", "text": "A derivative measures how a function changes..." },
-    { "role": "user",  "text": "Can you give me a simple example?" },
-    { "role": "model", "text": "Sure! If f(x) = x², then f'(x) = 2x..." }
+    { "role": "user",  "text": "Click the home button." },
+    { "role": "model", "parts": [{ "functionCall": { "name": "click", "args": { "x": 10, "y": 20 } } }] },
+    { "role": "function", "parts": [{ "functionResponse": { "name": "click", "response": { "success": true } } }] }
   ],
-  "prompt": "Now explain the chain rule."
+  "prompt": "Great, now type search."
 }
 ```
 
-> `history` must alternate between `user` and `model` roles and must end with a `model` turn. The current `prompt` is always the final user turn — do not include it in `history`.
+> `history` must alternate roles and end with a `model` turn. The current `prompt` or `parts` is always the final user turn.
+> `history[].parts` allows preserving complex multimodal content or tool call interactions from previous turns.
 
 #### With thinking model
 ```json
@@ -429,25 +434,26 @@ Supports **system instructions**, **conversation history**, **multimodal images*
 
 > Set `thinkingBudget: 0` to disable thinking. Omit to use the model's default budget.
 
-#### Image + text (multimodal)
+#### With tools (Computer Use / Function Calling)
 ```json
 {
-  "prompt": "What is written on this receipt? List each item and total.",
-  "images": [
-    {
-      "type":     "base64",
-      "mimeType": "image/jpeg",
-      "data":     "/9j/4AAQSkZJRgABAQAA..."
-    }
-  ]
-}
-```
-
-#### Image URL
-```json
-{
-  "prompt": "Describe what you see.",
-  "images": [{ "type": "url", "mimeType": "image/png", "url": "https://example.com/chart.png" }]
+  "prompt": "Interact with the screen.",
+  "tools": [{
+    "functionDeclarations": [
+      {
+        "name": "click",
+        "description": "Click coordinates",
+        "parameters": {
+          "type": "OBJECT",
+          "properties": {
+            "x": { "type": "INTEGER" },
+            "y": { "type": "INTEGER" }
+          },
+          "required": ["x", "y"]
+        }
+      }
+    ]
+  }]
 }
 ```
 
@@ -472,24 +478,31 @@ Supports **system instructions**, **conversation history**, **multimodal images*
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `role` | `"user"` \| `"model"` | ✅ | Who sent this message |
-| `text` | string | ✅ | The message content |
+| `role` | `"user"` \| `"model"` \| `"function"` | ✅ | Who sent this message |
+| `text` | string | ❌ | The message content (simplified) |
+| `parts` | array | ❌ | Structured parts list (for complex content/tooling) |
 
 - Maximum **200 turns** in history
-- Must alternate `user` / `model` roles
+- Must alternate `user` / `model` / `function` roles
 
 ---
 
 #### Available models
 
-Any valid Gemini model string is accepted. The default fallback chain (admin-configurable) is:
+Any valid Gemini model string is accepted. The default fallback chain (admin-configurable) includes:
 
 | Model | Notes |
 |---|---|
-| `gemini-3-flash-preview` | Primary — most capable, tried first |
+| `gemini-3-flash-preview` | Primary fallback — tried first |
+| `gemini-3.1-flash-lite` | Stable 3.1 lite |
 | `gemini-2.5-flash` | Fast + smart, supports thinking |
-| `gemini-2.5-flash-lite` | Lightweight |
-| `gemini-3.1-flash-lite-preview` | Lightest fallback |
+| `gemini-2.5-flash-lite` | Lightweight fallback |
+| `gemini-3.1-flash-lite-preview` | Preview fallback |
+| `gemini-3-flash-live` | Real-time conversational (Live API) |
+| `gemini-3-flash-live-preview` | Preview real-time live model |
+| `gemini-3.5-live-translate-preview` | Low-latency live translator model |
+| `gemini-2.5-flash-preview-native-audio-dialog` | Legacy real-time audio dialog |
+| `gemini-3.1-flash-tts-preview` | Specialized Text-to-Speech synthesis |
 
 > If a user-specified model fails with a timeout or 503, the backend automatically falls back to the configured chain and continues retrying. The `model` field in the response shows which model actually generated the reply.
 
@@ -499,11 +512,19 @@ Any valid Gemini model string is accepted. The default fallback chain (admin-con
 
 ```json
 {
-  "text":       "The receipt shows: Coffee $4.50, Sandwich $8.75. Total: $13.25",
-  "model":      "gemini-2.5-flash",
-  "request_id": "a1b2c3d4-...",
-  "retries":    0,
-  "latency_ms": 1240,
+  "text":          "Sure, clicking the screen.",
+  "audio":         "UklGRigAAABXQVZFZm10I...",  // Optional: base64 audio bytes if AUDIO modality requested
+  "mimeType":      "audio/l16; rate=24000; channels=1", // Optional: audio mimeType
+  "functionCalls": [                            // Optional: function call instructions requested by model
+    {
+      "name": "click",
+      "args": { "x": 12, "y": 45 }
+    }
+  ],
+  "model":         "gemini-2.5-flash",
+  "request_id":    "a1b2c3d4-...",
+  "retries":       0,
+  "latency_ms":    1240,
   "usageMetadata": {
     "promptTokenCount":     266,
     "candidatesTokenCount": 38,
@@ -621,7 +642,7 @@ For batch requests (array input), the response contains `embeddings` (array of e
 
 Same as `/v1/generate` but the response is streamed as **Server-Sent Events (SSE)**.
 
-Supports all the same fields: `systemInstruction`, `history`, `images`, `files`, `thinkingBudget`, `model`, `temperature`, `maxOutputTokens`. The `files[]` array accepts up to 5 base64-encoded PDF/Excel/CSV documents (same shape as `/v1/generate`).
+Supports all the same fields: `systemInstruction`, `history`, `images`, `files`, `parts`, `tools`, `toolConfig`, `thinkingBudget`, `model`, `temperature`, `maxOutputTokens`, `responseModalities`, `speechConfig`. The `files[]` array accepts base64-encoded PDF/Excel/CSV/video documents (same shape as `/v1/generate`).
 
 **Authentication required. Rate-limited.**
 

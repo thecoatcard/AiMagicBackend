@@ -5,12 +5,20 @@ import { parseFileToContent } from '../services/fileParsers.js';
 // Accepted image MIME types
 const IMAGE_MIME_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
 
-// Accepted file MIME types (PDF + spreadsheets)
 const FILE_MIME_TYPES = [
   'application/pdf',
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
   'application/vnd.ms-excel',                                          // .xls
   'text/csv',                                                          // .csv
+  'video/mp4',
+  'video/webm',
+  'video/quicktime',
+  'audio/webm',
+  'audio/wav',
+  'audio/mp3',
+  'audio/mpeg',
+  'audio/ogg',
+  'audio/x-wav',
 ];
 
 // Shared image schema used by both generate and stream routes
@@ -51,10 +59,11 @@ const historySchema = {
   maxItems: 200,
   items: {
     type: 'object',
-    required: ['role', 'text'],
+    required: ['role'],
     properties: {
-      role: { type: 'string', enum: ['user', 'model'] },
-      text: { type: 'string', minLength: 1 },
+      role:  { type: 'string', enum: ['user', 'model', 'function'] },
+      text:  { type: 'string' },
+      parts: { type: 'array', items: { type: 'object' } },
     },
     additionalProperties: false,
   },
@@ -79,19 +88,24 @@ export async function generateRoutes(fastify) {
           systemInstruction: { type: 'string', minLength: 1, maxLength: 8192 },
           history:           historySchema,
           thinkingBudget:    { type: 'integer', minimum: 0, maximum: 24576 },
+          responseModalities: { type: 'array', items: { type: 'string' } },
+          speechConfig:       { type: 'object' },
+          parts:              { type: 'array', items: { type: 'object' } },
+          tools:              { type: 'array', items: { type: 'object' } },
+          toolConfig:         { type: 'object' },
         },
       },
     },
   }, async (request, reply) => {
     const { prompt, images, files, model, temperature, maxOutputTokens,
-            systemInstruction, history, thinkingBudget } = request.body;
-
+            systemInstruction, history, thinkingBudget, responseModalities, speechConfig, parts, tools, toolConfig } = request.body;
+ 
     // Must have at least one content part
-    if (!prompt && (!images || images.length === 0) && (!files || files.length === 0)) {
+    if (!prompt && (!images || images.length === 0) && (!files || files.length === 0) && (!parts || parts.length === 0)) {
       reply.status(400);
-      return { error: 'Either prompt, images, or files (or a combination) must be provided', code: 'BAD_REQUEST' };
+      return { error: 'Either prompt, images, files, or parts must be provided', code: 'BAD_REQUEST' };
     }
-
+ 
     // Validate: base64 images must have data; url images must have url
     if (images) {
       for (const img of images) {
@@ -110,7 +124,7 @@ export async function generateRoutes(fastify) {
         }
       }
     }
-
+ 
     // Parse files (PDF → inline binary part, Excel/CSV → extracted text)
     let parsedFiles;
     if (files?.length) {
@@ -121,7 +135,7 @@ export async function generateRoutes(fastify) {
         return { error: err.message, code: 'BAD_REQUEST' };
       }
     }
-
+ 
     const options = {};
     if (temperature        !== undefined) options.temperature        = temperature;
     if (maxOutputTokens    !== undefined) options.maxOutputTokens    = maxOutputTokens;
@@ -130,7 +144,12 @@ export async function generateRoutes(fastify) {
     if (systemInstruction)                options.systemInstruction  = systemInstruction;
     if (history?.length)                  options.history            = history;
     if (thinkingBudget     !== undefined) options.thinkingBudget     = thinkingBudget;
-
+    if (responseModalities !== undefined) options.responseModalities = responseModalities;
+    if (speechConfig       !== undefined) options.speechConfig       = speechConfig;
+    if (parts?.length)                    options.parts              = parts;
+    if (tools?.length)                    options.tools              = tools;
+    if (toolConfig)                       options.toolConfig         = toolConfig;
+ 
     const result = await runGenerate({ prompt: prompt ?? '', model, options, userEmail: request.user?.email });
 
     if (result.error) {

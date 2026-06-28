@@ -41,18 +41,23 @@ export async function streamRoutes(fastify) {
           systemInstruction: { type: 'string', minLength: 1, maxLength: 8192 },
           history: historySchema,
           thinkingBudget: { type: 'integer', minimum: 0, maximum: 24576 },
+          responseModalities: { type: 'array', items: { type: 'string' } },
+          speechConfig:       { type: 'object' },
+          parts:              { type: 'array', items: { type: 'object' } },
+          tools:              { type: 'array', items: { type: 'object' } },
+          toolConfig:         { type: 'object' },
         },
       },
     },
   }, async (request, reply) => {
     const { prompt, images, files, model, temperature, maxOutputTokens,
-      systemInstruction, history, thinkingBudget } = request.body;
-
-    if (!prompt && (!images || images.length === 0) && (!files || files.length === 0)) {
+      systemInstruction, history, thinkingBudget, responseModalities, speechConfig, parts, tools, toolConfig } = request.body;
+ 
+    if (!prompt && (!images || images.length === 0) && (!files || files.length === 0) && (!parts || parts.length === 0)) {
       reply.status(400);
-      return { error: 'Either prompt, images, or files (or a combination) must be provided', code: 'BAD_REQUEST' };
+      return { error: 'Either prompt, images, files, or parts must be provided', code: 'BAD_REQUEST' };
     }
-
+ 
     if (images) {
       for (const img of images) {
         const t = img.type ?? 'base64';
@@ -66,7 +71,7 @@ export async function streamRoutes(fastify) {
         }
       }
     }
-
+ 
     // Parse files (PDF → inline binary part, Excel/CSV → extracted text)
     let parsedFiles;
     if (files?.length) {
@@ -77,7 +82,7 @@ export async function streamRoutes(fastify) {
         return { error: err.message, code: 'BAD_REQUEST' };
       }
     }
-
+ 
     const options = {};
     if (temperature !== undefined) options.temperature = temperature;
     if (maxOutputTokens !== undefined) options.maxOutputTokens = maxOutputTokens;
@@ -86,6 +91,11 @@ export async function streamRoutes(fastify) {
     if (systemInstruction) options.systemInstruction = systemInstruction;
     if (history?.length) options.history = history;
     if (thinkingBudget !== undefined) options.thinkingBudget = thinkingBudget;
+    if (responseModalities !== undefined) options.responseModalities = responseModalities;
+    if (speechConfig !== undefined) options.speechConfig = speechConfig;
+    if (parts?.length) options.parts = parts;
+    if (tools?.length) options.tools = tools;
+    if (toolConfig) options.toolConfig = toolConfig;
 
     const requestId = randomUUID();
     const userEmail = request.user?.email;

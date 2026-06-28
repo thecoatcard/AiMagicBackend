@@ -246,37 +246,45 @@ export async function generateImage(key, model, prompt, options = {}) {
 
 function buildRequestBody(prompt, options = {}) {
   // ── Build the current user turn ────────────────────────────────────────────
-  const parts = [];
+  let parts = [];
 
-  if (prompt && prompt.length > 0) {
-    parts.push({ text: prompt });
-  }
-
-  // File attachments (PDF as inline binary, Excel/CSV as extracted text)
-  for (const file of options.files ?? []) {
-    if (file.type === 'inlineData') {
-      parts.push({ inlineData: { mimeType: file.mimeType, data: file.data } });
-    } else if (file.type === 'text') {
-      parts.push({ text: file.text });
+  if (options.parts && options.parts.length > 0) {
+    parts = options.parts;
+  } else {
+    if (prompt && prompt.length > 0) {
+      parts.push({ text: prompt });
     }
-  }
 
-  for (const img of options.images ?? []) {
-    if (img.type === 'url') {
-      parts.push({ fileData: { mimeType: img.mimeType, fileUri: img.url } });
-    } else {
-      parts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
+    // File attachments (PDF/video as inline binary, Excel/CSV as extracted text)
+    for (const file of options.files ?? []) {
+      if (file.type === 'inlineData') {
+        parts.push({ inlineData: { mimeType: file.mimeType, data: file.data } });
+      } else if (file.type === 'text') {
+        parts.push({ text: file.text });
+      }
+    }
+
+    for (const img of options.images ?? []) {
+      if (img.type === 'url') {
+        parts.push({ fileData: { mimeType: img.mimeType, fileUri: img.url } });
+      } else {
+        parts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
+      }
     }
   }
 
   if (parts.length === 0) {
-    throw new Error('Request must contain at least one text, image, or file part');
+    throw new Error('Request must contain at least one text, image, file, or parts entry');
   }
 
   // ── Assemble contents: prior history turns + current user turn ─────────────
   const contents = [];
   for (const turn of options.history ?? []) {
-    contents.push({ role: turn.role, parts: [{ text: turn.text }] });
+    if (turn.parts && turn.parts.length > 0) {
+      contents.push({ role: turn.role, parts: turn.parts });
+    } else {
+      contents.push({ role: turn.role, parts: [{ text: turn.text || '' }] });
+    }
   }
   contents.push({ role: 'user', parts });
 
@@ -287,6 +295,13 @@ function buildRequestBody(prompt, options = {}) {
     ...options.generationConfig,
   };
 
+  if (options.responseModalities !== undefined) {
+    generationConfig.responseModalities = options.responseModalities;
+  }
+  if (options.speechConfig !== undefined) {
+    generationConfig.speechConfig = options.speechConfig;
+  }
+
   // Thinking budget — supported by gemini-2.5-flash, gemini-2.5-pro, etc.
   // Set to 0 to disable thinking; omit to use the model default.
   if (options.thinkingBudget !== undefined) {
@@ -294,6 +309,13 @@ function buildRequestBody(prompt, options = {}) {
   }
 
   const body = { contents, generationConfig };
+
+  if (options.tools !== undefined) {
+    body.tools = options.tools;
+  }
+  if (options.toolConfig !== undefined) {
+    body.toolConfig = options.toolConfig;
+  }
 
   // System instruction — sets model persona/behavior before any user turn
   if (options.systemInstruction) {

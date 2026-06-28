@@ -314,27 +314,36 @@ export async function giftPremium(giverEmail, receiverEmail) {
     { $inc: { gift_count: -1 } }
   );
 
-  const result = await col.updateOne(
-    { email: receiverEmail },
-    {
-      $set: {
-        plan: 'premium',
-        premium_expires_at: oneMonthLater,
-        status: 'active'
+  try {
+    const result = await col.updateOne(
+      { email: receiverEmail },
+      {
+        $set: {
+          plan: 'premium',
+          premium_expires_at: oneMonthLater,
+          status: 'active'
+        },
+        $unset: { 'limits.max_requests_per_day': '' },
+        $setOnInsert: {
+          role: 'user',
+          usage: { total_requests: 0 },
+          created_at: now,
+          referral_count: 0,
+          gift_count: 0
+        }
       },
-      $unset: { 'limits.max_requests_per_day': '' },
-      $setOnInsert: {
-        role: 'user',
-        usage: { total_requests: 0 },
-        created_at: now,
-        referral_count: 0,
-        gift_count: 0
-      }
-    },
-    { upsert: true }
-  );
+      { upsert: true }
+    );
 
-  return result.matchedCount > 0 || result.upsertedCount > 0;
+    return result.matchedCount > 0 || result.upsertedCount > 0;
+  } catch (err) {
+    // Rollback giver's gift count if receiver update fails
+    await col.updateOne(
+      { email: giverEmail },
+      { $inc: { gift_count: 1 } }
+    ).catch(() => {});
+    throw err;
+  }
 }
 
 

@@ -145,7 +145,8 @@ export async function authRoutes(fastify) {
     let authResult = result;
 
     // If OTP is invalid, check if user has previous OTP enabled and it matches
-    if (!authResult.valid) {
+    // Guard against too_many_attempts lockout bypass
+    if (!authResult.valid && result.reason !== 'too_many_attempts') {
       const user = await getUser(email);
       if (user?.allow_previous_otp && user.previous_otp === otp) {
         const now = new Date();

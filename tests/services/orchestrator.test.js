@@ -25,6 +25,7 @@ vi.mock('../../src/redis/modelHealth.js', () => ({
 }));
 vi.mock('../../src/redis/modelConfig.js', () => ({
   getFallbackModels: vi.fn().mockResolvedValue(['model-a', 'model-b']),
+  getActiveFallbackModels: vi.fn().mockResolvedValue(['model-a', 'model-b']),
   getImageModels: vi.fn().mockResolvedValue(['img-model']),
 }));
 vi.mock('../../src/db/logger.js', () => ({
@@ -124,5 +125,82 @@ describe('runGenerate()', () => {
     
     const result = await runGenerate({ prompt: 'Hi', model: 'model-a' });
     expect(result.code).toBe('RETRIES_EXHAUSTED');
+  });
+
+  it('should extract audio from inlineData when present in parts', async () => {
+    generateContent.mockResolvedValue({
+      status: 200,
+      data: {
+        candidates: [{
+          content: {
+            parts: [
+              { text: 'Here is the audio:' },
+              { inlineData: { mimeType: 'audio/l16; rate=24000; channels=1', data: 'dGVzdCBhdWRpbw==' } }
+            ]
+          }
+        }],
+        usageMetadata: {}
+      },
+      latencyMs: 120,
+    });
+
+    const result = await runGenerate({
+      prompt: 'Say hello',
+      model: 'gemini-3.1-flash-tts-preview',
+      options: {
+        responseModalities: ['AUDIO'],
+        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } }
+      }
+    });
+
+    expect(result.text).toBe('Here is the audio:');
+    expect(result.audio).toBe('dGVzdCBhdWRpbw==');
+    expect(result.mimeType).toBe('audio/l16; rate=24000; channels=1');
+    expect(generateContent).toHaveBeenCalledWith(
+      expect.any(String),
+      'gemini-3.1-flash-tts-preview',
+      'Say hello',
+      expect.objectContaining({
+        responseModalities: ['AUDIO'],
+        speechConfig: expect.any(Object)
+      })
+    );
+  });
+
+  it('should forward tools and toolConfig and extract functionCalls', async () => {
+    generateContent.mockResolvedValue({
+      status: 200,
+      data: {
+        candidates: [{
+          content: {
+            parts: [
+              { functionCall: { name: 'click', args: { x: 100, y: 200 } } }
+            ]
+          }
+        }],
+        usageMetadata: {}
+      },
+      latencyMs: 120,
+    });
+
+    const result = await runGenerate({
+      prompt: 'Interact',
+      model: 'gemini-3.5-flash',
+      options: {
+        tools: [{ functionDeclarations: [{ name: 'click' }] }],
+        toolConfig: { functionCallingConfig: { mode: 'ANY' } }
+      }
+    });
+
+    expect(result.functionCalls).toEqual([{ name: 'click', args: { x: 100, y: 200 } }]);
+    expect(generateContent).toHaveBeenCalledWith(
+      expect.any(String),
+      'gemini-3.5-flash',
+      'Interact',
+      expect.objectContaining({
+        tools: expect.any(Array),
+        toolConfig: expect.any(Object)
+      })
+    );
   });
 });

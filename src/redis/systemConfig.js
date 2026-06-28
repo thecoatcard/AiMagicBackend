@@ -15,7 +15,7 @@ const DEFAULTS = {
   maintenance_mode:        '0',
   generation_enabled:      '1',
   registration_enabled:    '1',
-  default_per_min:         '20',
+  default_per_min:         '60',
   alert_failure_threshold: '10',
   alert_queue_threshold:   '100',
   alert_pool_low_threshold:'5',
@@ -147,7 +147,7 @@ export async function isHivemindRuntimeEnabled() {
  */
 export async function getDefaultPerMin() {
   const val = await getSystemConfig('default_per_min');
-  return parseInt(val, 10) || 20;
+  return parseInt(val, 10) || 60;
 }
 
 /**

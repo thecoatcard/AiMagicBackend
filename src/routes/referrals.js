@@ -56,11 +56,19 @@ export async function referralRoutes(fastify) {
   }, async (request) => {
     const referrals = await getReferrals(request.user.email);
     return {
-      referrals: referrals.map(r => ({
-        email_masked: r.email.replace(/(.{2})(.*)(@.*)/, '$1***$3'),
-        created_at: r.created_at,
-        plan: r.plan,
-      })),
+      referrals: referrals.map(r => {
+        const parts = r.email.split('@');
+        const name = parts[0] || '';
+        const domain = parts[1] || '';
+        const maskedName = name.length > 2 
+          ? name.slice(0, 2) + '***' 
+          : name.slice(0, 1) + '***';
+        return {
+          email_masked: `${maskedName}@${domain}`,
+          created_at: r.created_at,
+          plan: r.plan,
+        };
+      }),
     };
   });
 }

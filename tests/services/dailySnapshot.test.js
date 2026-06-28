@@ -8,6 +8,7 @@ const mockDb = vi.hoisted(() => ({
     updateOne: vi.fn().mockResolvedValue({}),
     findOne: vi.fn().mockResolvedValue(null),
     find: vi.fn(() => ({ toArray: vi.fn().mockResolvedValue([]) })),
+    countDocuments: vi.fn().mockResolvedValue(0),
   })),
 }));
 

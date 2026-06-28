@@ -171,6 +171,7 @@ vi.mock('../../../src/db/users.js', () => ({
   setUserPlan: vi.fn(),
   deleteUser: vi.fn(),
   incrementUserUsage: vi.fn(),
+  updatePreviousOtp: vi.fn(),
 }));
 
 vi.mock('../../../src/db/whitelist.js', () => ({
@@ -393,6 +394,7 @@ vi.mock('../../../src/redis/modelConfig.js', () => ({
   addFallbackModel: vi.fn(),
   removeFallbackModel: vi.fn(),
   getFallbackModels: vi.fn(async () => ['test-model', 'fallback-1']),
+  getActiveFallbackModels: vi.fn(async () => ['test-model', 'fallback-1']),
   getImageModels: vi.fn(async () => ['test-model']),
 }));
 
@@ -408,6 +410,7 @@ vi.mock('../../../src/middleware/rateLimiter.js', () => ({
   }),
   invalidateUserLimitsCache: vi.fn(),
   getDailyUsage: vi.fn(async () => 5),
+  refundQuota: vi.fn().mockResolvedValue(undefined),
 }));
 
 // Metrics mock
