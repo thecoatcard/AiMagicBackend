@@ -144,15 +144,15 @@ export async function streamRoutes(fastify) {
       }
     }
 
-    // Validate user-supplied model before wasting an upstream API call
-    if (model && !ALL_SUPPORTED_MODELS.includes(model)) {
+    // ── Model selection — mirrors orchestrator.js logic ──────────────────────
+    const fallbackModels = await getActiveFallbackModels();
+
+    // Validate user-supplied model — accept hard-coded defaults AND admin-configured fallback models
+    if (model && !ALL_SUPPORTED_MODELS.includes(model) && !fallbackModels.includes(model)) {
       if (userEmail) refundQuota(userEmail, 1).catch(() => {});
       reply.status(400);
       return { error: `Model '${model}' is not supported`, code: 'INVALID_MODEL', request_id: requestId };
     }
-
-    // ── Model selection — mirrors orchestrator.js logic ──────────────────────
-    const fallbackModels = await getActiveFallbackModels();
     let currentModel = model ?? await getBestModel(fallbackModels);
 
     // Short-circuit: if admin removed all fallback models AND caller omitted

@@ -1,7 +1,7 @@
 import { runGenerate, runEmbed } from '../services/orchestrator.js';
 import { checkUserRateLimit, refundQuota } from '../middleware/rateLimiter.js';
 import { parseFileToContent } from '../services/fileParsers.js';
-import { ALL_SUPPORTED_MODELS } from '../redis/modelConfig.js';
+import { ALL_SUPPORTED_MODELS, getActiveFallbackModels } from '../redis/modelConfig.js';
 
 // Accepted image MIME types
 const IMAGE_MIME_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
@@ -101,10 +101,13 @@ export async function generateRoutes(fastify) {
     const { prompt, images, files, model, temperature, maxOutputTokens,
             systemInstruction, history, thinkingBudget, responseModalities, speechConfig, parts, tools, toolConfig } = request.body;
  
-    // Validate user-supplied model before wasting an upstream API call
+    // Validate user-supplied model — accept hard-coded defaults AND admin-configured fallback models
     if (model && !ALL_SUPPORTED_MODELS.includes(model)) {
-      reply.status(400);
-      return { error: `Model '${model}' is not supported`, code: 'INVALID_MODEL' };
+      const fallbackModels = await getActiveFallbackModels();
+      if (!fallbackModels.includes(model)) {
+        reply.status(400);
+        return { error: `Model '${model}' is not supported`, code: 'INVALID_MODEL' };
+      }
     }
 
     // Must have at least one content part
