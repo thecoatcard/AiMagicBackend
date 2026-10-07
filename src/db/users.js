@@ -498,19 +498,21 @@ export async function listUsersFiltered({ role, plan, status, email, limit = 50,
 export async function getUserStats() {
   const db = await getDb();
   const col = db.collection('users');
-  const [total, byRole, byPlan, byStatus, totalReferrals] = await Promise.all([
+  const [total, byRole, byPlan, byStatus, totalReferrals, totalApiCalls] = await Promise.all([
     col.countDocuments(),
     col.aggregate([{ $group: { _id: '$role',   count: { $sum: 1 } } }]).toArray(),
     col.aggregate([{ $group: { _id: '$plan',   count: { $sum: 1 } } }]).toArray(),
     col.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]).toArray(),
     col.aggregate([{ $group: { _id: null, count: { $sum: '$referral_count' } } }]).next(),
+    col.aggregate([{ $group: { _id: null, count: { $sum: '$usage.total_requests' } } }]).next(),
   ]);
   return {
     total,
-    by_role:   Object.fromEntries(byRole.map(r   => [r._id, r.count])),
-    by_plan:   Object.fromEntries(byPlan.map(r   => [r._id, r.count])),
-    by_status: Object.fromEntries(byStatus.map(r => [r._id, r.count])),
+    by_role:        Object.fromEntries(byRole.map(r   => [r._id, r.count])),
+    by_plan:        Object.fromEntries(byPlan.map(r   => [r._id, r.count])),
+    by_status:      Object.fromEntries(byStatus.map(r => [r._id, r.count])),
     total_referrals: totalReferrals?.count || 0,
+    total_api_calls: totalApiCalls?.count  || 0,
   };
 }
 
