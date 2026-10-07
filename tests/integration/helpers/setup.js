@@ -119,7 +119,7 @@ vi.mock('../../../src/redis/systemConfig.js', () => ({
   setSystemConfig: vi.fn(async () => 'OK'),
   bustAllUserCaches: vi.fn(async () => undefined),
   getFailureRateCount: vi.fn(async () => 0),
-  recordFailureRateTick: vi.fn(),
+  recordFailureRateTick: vi.fn().mockResolvedValue(undefined),
 }));
 
 // DB mocks
@@ -364,7 +364,10 @@ vi.mock('../../../src/services/alertThrottle.js', () => ({}));
 vi.mock('../../../src/services/dailySnapshot.js', () => ({}));
 
 // Redis sub-module mocks
-vi.mock('../../../src/redis/keyPool.js', () => ({
+vi.mock('../../../src/redis/keyPool.js', async (importOriginal) => ({
+  classifyKeyFailure: (await importOriginal()).classifyKeyFailure,
+  resolveRawKey: vi.fn(async () => 'test-key-123456789'),
+  removeKey: vi.fn(async () => ({ removed: true })),
   listKeys: vi.fn(async () => [{ key: 'AIza...xxxx', status: 'active' }]),
   addKey: vi.fn(async () => ({ status: 'added' })),
   enableKey: vi.fn(),
@@ -374,8 +377,8 @@ vi.mock('../../../src/redis/keyPool.js', () => ({
   getKey: vi.fn(async () => 'test-key'),
   returnKey: vi.fn(),
   cooldownKey: vi.fn(),
-  recordKeySuccess: vi.fn(),
-  recordKeyFailure: vi.fn(),
+  recordKeySuccess: vi.fn().mockResolvedValue(undefined),
+  recordKeyFailure: vi.fn().mockResolvedValue(undefined),
   isPoolExhausted: vi.fn().mockResolvedValue(false),
 }));
 

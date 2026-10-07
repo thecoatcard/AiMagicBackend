@@ -1,10 +1,71 @@
-import { listKeys, addKey, enableKey, disableKey, clearAllCooldowns, getPoolStats } from '../redis/keyPool.js';
+import { listKeys, addKey, enableKey, disableKey, clearAllCooldowns, getPoolStats, removeKey, resolveRawKey, classifyKeyFailure } from '../redis/keyPool.js';
+import { generateContent } from '../services/gemini.js';
+import { config } from '../config.js';
 import { getDb } from '../db/client.js';
 import { notifyAdminKeyDisabled } from '../services/notifications.js';
 import { writeAuditLog } from '../db/auditLog.js';
 import { maskKey } from '../services/orchestrator.js';
 
 export async function keysRoutes(fastify) {
+  fastify.post('/v1/keys/bulk-delete', {
+    schema: {
+      body: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['keys'],
+        properties: {
+          keys: { type: 'array', minItems: 1, maxItems: 100, uniqueItems: true, items: { type: 'string', pattern: '^.{4}…[a-f0-9]{6}….{4}$' } },
+        },
+      },
+    },
+  }, async (request) => {
+    const results = [];
+    for (let offset = 0; offset < request.body.keys.length; offset += 10) {
+      const batch = await Promise.all(request.body.keys.slice(offset, offset + 10).map(async key => {
+        try {
+          return { key, ...await removeKey(key) };
+        } catch {
+          return { key, removed: false, error: 'Deletion failed; retry this key' };
+        }
+      }));
+      results.push(...batch);
+    }
+    writeAuditLog({ actorEmail: request.user.email, action: 'bulk_key_delete', meta: { count: results.filter(result => result.removed).length } });
+    return { results };
+  });
+
+  fastify.post('/v1/keys/:key/test', {
+    schema: {
+      params: { type: 'object', required: ['key'], properties: { key: { type: 'string', pattern: '^.{4}…[a-f0-9]{6}….{4}$' } } },
+      body: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { model: { type: 'string', minLength: 1, maxLength: 100, pattern: '^[a-zA-Z0-9._-]+$' } },
+      },
+    },
+  }, async (request, reply) => {
+    const key = await resolveRawKey(request.params.key);
+    if (!key) return reply.code(404).send({ error: 'Key not found' });
+    const model = request.body?.model ?? config.defaultModel;
+    const start = Date.now();
+    try {
+      const result = await generateContent(key, model, 'Say "ok"', { maxOutputTokens: 5 });
+      const reason = classifyKeyFailure(result);
+      if (reason) await disableKey(key, reason);
+      writeAuditLog({ actorEmail: request.user.email, action: 'key_test', meta: { key: request.params.key, model, status: result.status } });
+      return {
+        ok: result.status === 200,
+        status: result.status,
+        reason,
+        model,
+        latency_ms: Date.now() - start,
+        error: result.status === 200 ? null : reason ?? `Provider returned HTTP ${result.status}`,
+      };
+    } catch {
+      return { ok: false, status: 'error', model, latency_ms: Date.now() - start, error: 'Provider test failed or timed out' };
+    }
+  });
+
   // List all keys (masked)
   fastify.get('/v1/keys', async () => {
     return listKeys();

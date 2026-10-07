@@ -1,5 +1,7 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import { buildTestServer, makeToken } from './helpers/setup.js';
+import { getKey, disableKey } from '../../src/redis/keyPool.js';
+import { streamGenerateContent } from '../../src/services/gemini.js';
 
 let app;
 
@@ -111,6 +113,17 @@ describe('Generate Integration', () => {
   });
 
   describe('POST /v1/generate/stream', () => {
+    it('quarantines a leaked streamed credential before retrying', async () => {
+      const bodyStream = { on: vi.fn(), destroy: vi.fn(), json: vi.fn(async () => ({ error: { message: 'API key reported as leaked' } })) };
+      vi.mocked(getKey).mockResolvedValueOnce('leaked-test-key').mockResolvedValueOnce(null);
+      vi.mocked(streamGenerateContent).mockResolvedValueOnce({ status: 400, bodyStream });
+      const res = await app.inject({ method: 'POST', url: '/v1/generate/stream', headers, payload: { prompt: 'Hello', model: 'test-model' } });
+      expect(res.statusCode).toBe(503);
+      expect(disableKey).toHaveBeenCalledWith('leaked-test-key', 'key_leaked');
+      expect(bodyStream.json).toHaveBeenCalled();
+      expect(bodyStream.destroy).toHaveBeenCalled();
+    });
+
     it('should accept same body shape as /v1/generate', async () => {
       // Stream endpoint should accept the request — it may fail during streaming,
       // but the contract (request shape acceptance) is what we test.

@@ -33,6 +33,7 @@ const DISABLE_LUA = `
 // Atomic ZREM-from-cooldown + LPUSH-to-active.
 const ENABLE_LUA = `
   redis.call('ZREM', KEYS[1], ARGV[1])
+  redis.call('LREM', KEYS[2], 0, ARGV[1])
   redis.call('LPUSH', KEYS[2], ARGV[1])
   return 1
 `;
@@ -52,7 +53,7 @@ function maskKey(key) {
  * O(1) instead of O(N) — no scanning required.
  * Returns null if no match is found.
  */
-async function resolveRawKey(maskedKey) {
+export async function resolveRawKey(maskedKey) {
   if (!maskedKey.includes('…')) return maskedKey;
   const raw = await getRedis().hget(KEY_REVERSE_MAP, maskedKey);
   return raw || null;
@@ -96,6 +97,8 @@ export async function getKey() {
 export async function returnKey(key) {
   const redis = getRedis();
   const luaScript = `
+    if redis.call('HGET', KEYS[3], ARGV[2]) ~= ARGV[1] then return 0 end
+    if redis.call('ZSCORE', KEYS[2], ARGV[1]) ~= false then return 0 end
     local exists = redis.call('LPOS', KEYS[1], ARGV[1])
     if exists == false then
       redis.call('LPUSH', KEYS[1], ARGV[1])
@@ -103,7 +106,7 @@ export async function returnKey(key) {
     end
     return 0
   `;
-  await redis.eval(luaScript, 1, ACTIVE_LIST, key);
+  await redis.eval(luaScript, 3, ACTIVE_LIST, COOLDOWN_ZSET, KEY_REVERSE_MAP, key, maskKey(key));
 }
 
 /**
@@ -146,7 +149,7 @@ async function checkPoolLow(redis) {
   // 1. Auto-reactivate temporary cooldowns if pool is running low (FIX-5)
   // This helps maintain availability during traffic spikes or transient errors.
   if (activeCount <= AUTO_RESTORE_THRESHOLD) {
-    const restored = await clearAllCooldowns();
+    const restored = await restoreExpiredKeys();
     if (restored > 0) {
       console.info(`[keyPool] Auto-restored ${restored} keys (active count: ${activeCount})`);
     }
@@ -165,6 +168,13 @@ export async function enableKey(key) {
   const redis = getRedis();
   const rawKey = await resolveRawKey(key);
   if (!rawKey) return; // Key not found in any pool
+  const stored = (await getAllApiKeys()).find(entry => entry.key === rawKey);
+  if (stored?.last_reason === 'key_leaked' || stored?.last_reason === 'key_revoked') {
+    const error = new Error('Compromised credentials cannot be re-enabled; replace this key');
+    error.statusCode = 409;
+    error.code = 'KEY_QUARANTINED';
+    throw error;
+  }
   await redis.eval(ENABLE_LUA, 2, COOLDOWN_ZSET, ACTIVE_LIST, rawKey);
 
   // Sync to MongoDB
@@ -205,13 +215,15 @@ export async function addKey(key) {
  */
 export async function removeKey(key) {
   const redis = getRedis();
-  const masked = maskKey(key);
+  const rawKey = await resolveRawKey(key);
+  if (!rawKey) return { removed: false };
+  const masked = maskKey(rawKey);
+  await removeKeyFromDb(rawKey);
+  await redis.hdel(KEY_REVERSE_MAP, masked);
   await Promise.all([
-    redis.lrem(ACTIVE_LIST, 0, key),
-    redis.zrem(COOLDOWN_ZSET, key),
+    redis.lrem(ACTIVE_LIST, 0, rawKey),
+    redis.zrem(COOLDOWN_ZSET, rawKey),
     redis.hdel(KEY_STATS_HASH, masked),
-    redis.hdel(KEY_REVERSE_MAP, masked),
-    removeKeyFromDb(key),
   ]);
   return { removed: true };
 }
@@ -236,7 +248,7 @@ export async function restoreExpiredKeys() {
     return #keys
   `;
 
-  await redis.eval(luaScript, 2, COOLDOWN_ZSET, ACTIVE_LIST, now);
+  return redis.eval(luaScript, 2, COOLDOWN_ZSET, ACTIVE_LIST, now);
 }
 
 /**
@@ -246,11 +258,13 @@ export async function listKeys() {
   const redis = getRedis();
   const now = Date.now();
 
-  const [activeKeys, cooldownEntries, statsRaw] = await Promise.all([
+  const [activeKeys, cooldownEntries, statsRaw, storedKeys] = await Promise.all([
     redis.lrange(ACTIVE_LIST, 0, -1),
     redis.zrangebyscore(COOLDOWN_ZSET, '-inf', '+inf', 'WITHSCORES'),
     redis.hgetall(KEY_STATS_HASH),
+    getAllApiKeys(),
   ]);
+  const reasons = new Map(storedKeys.map(entry => [entry.key, entry.last_reason]));
 
   const stats = {};
   for (const [k, v] of Object.entries(statsRaw)) {
@@ -273,15 +287,28 @@ export async function listKeys() {
     const score = parseInt(cooldownEntries[i + 1], 10);
     const permanent = score === DISABLED_SCORE;
     const masked = maskKey(k);
+    const reason = reasons.get(k) ?? null;
+    const status = reason === 'key_leaked' ? 'leaked' : reason === 'key_revoked' ? 'revoked' : 'disabled';
     cooldown.push({
       key: masked,
-      status: permanent ? 'disabled' : 'cooldown',
+      status: permanent ? status : 'cooldown',
+      reason,
       cooldownRemainingMs: permanent ? null : Math.max(0, score - now),
       stats: stats[masked] ?? defaultStats,
     });
   }
 
   return { active, cooldown };
+}
+
+export function classifyKeyFailure(result) {
+  const error = result.data?.error;
+  const message = error?.message ?? '';
+  const reasons = (error?.details ?? []).map(detail => detail.reason);
+  if (/leaked/i.test(message)) return 'key_leaked';
+  if (/revoked|expired/i.test(message) || reasons.includes('API_KEY_EXPIRED')) return 'key_revoked';
+  if (result.status === 401 || reasons.includes('API_KEY_INVALID') || /api key not valid|invalid api key/i.test(message)) return 'key_invalid';
+  return null;
 }
 
 /**

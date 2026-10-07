@@ -1864,7 +1864,17 @@ Error breakdown by type and model, with the 10 most recent errors.
 
 ## 13. Admin — Key Management
 
-Owner only. Manage the Gemini API key pool. Keys are always **masked** in responses (first 4 + `****` + last 4).
+Owner only. Manage the Gemini API key pool. Keys are always **masked** in responses (first 4 + ellipsis + 6-character SHA256 fragment + ellipsis + last 4). Use the exact returned identifier, URL-encoded for path parameters.
+
+### Credential Testing And Bulk Deletion
+
+`POST /v1/keys/:key/test` accepts `{ "model": "gemini-3.1-flash-lite-preview" }` or `{}` to use the server default. It resolves the masked identifier server-side and sends a minimal provider generation request. This consumes provider quota. Response: `{ "ok": true, "status": 200, "reason": null, "model": "...", "latency_ms": 123, "error": null }`. Unknown keys return `404`; malformed identifiers/models return `400`. Provider failures return `200` with `ok: false` and a sanitized error. A successful test does not automatically enable a disabled key.
+
+`POST /v1/keys/bulk-delete` accepts `{ "keys": ["AIza…abcdef…wxyz"] }`, with 1-100 unique masked identifiers. It deletes credentials from MongoDB, Redis pools, reverse lookups, and pool statistics using bounded concurrency. Response: `{ "results": [{ "key": "AIza…abcdef…wxyz", "removed": true }] }`. Unknown keys return `removed: false`; failed deletions include a sanitized `error`. Retry unsuccessful entries. Historical request/audit records are retained.
+
+Both endpoints require owner authentication and generate audit records (`key_test`, `bulk_key_delete`). They never return raw credentials.
+
+The `cooldown` array also includes permanent keys with `status: "disabled"`, `"leaked"`, or `"revoked"`, `cooldownRemainingMs: null`, and an optional `reason` such as `key_leaked` or `key_revoked`. Classification is based on provider responses during generation or testing, not a global leak scan. Legacy `key_invalid` entries remain disabled until a test identifies a specific reason. Compromised credentials cannot be re-enabled (`409 KEY_QUARANTINED`); replace them. Pool statistics continue counting all permanent states under `disabled`. Automatic low-pool recovery restores only expired cooldowns.
 
 ### `GET /v1/keys`
 

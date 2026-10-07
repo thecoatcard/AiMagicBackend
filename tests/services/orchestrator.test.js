@@ -3,7 +3,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('../../src/config.js', () => ({
   config: { cooldownMs: 60000, maxRetries: 3, requestTimeoutMs: 30000 },
 }));
-vi.mock('../../src/redis/keyPool.js', () => ({
+vi.mock('../../src/redis/keyPool.js', async (importOriginal) => ({
+  classifyKeyFailure: (await importOriginal()).classifyKeyFailure,
   getKey: vi.fn(),
   returnKey: vi.fn(),
   cooldownKey: vi.fn(),
@@ -47,9 +48,9 @@ vi.mock('../../src/metrics/index.js', () => ({
   modelTimeoutsTotal: { inc: vi.fn() },
 }));
 
-import { runGenerate, maskKey } from '../../src/services/orchestrator.js';
-import { getKey, returnKey, isPoolExhausted } from '../../src/redis/keyPool.js';
-import { generateContent } from '../../src/services/gemini.js';
+import { runGenerate, runEmbed, runImageGeneration, maskKey } from '../../src/services/orchestrator.js';
+import { getKey, returnKey, isPoolExhausted, disableKey } from '../../src/redis/keyPool.js';
+import { generateContent, embedContent, generateImage } from '../../src/services/gemini.js';
 import { getBestModel } from '../../src/redis/modelHealth.js';
 
 describe('maskKey()', () => {
@@ -125,6 +126,32 @@ describe('runGenerate()', () => {
     
     const result = await runGenerate({ prompt: 'Hi', model: 'model-a' });
     expect(result.code).toBe('RETRIES_EXHAUSTED');
+  });
+
+  it('quarantines a leaked key before retrying the same model', async () => {
+    generateContent.mockResolvedValueOnce({ status: 400, data: { error: { message: 'API key reported as leaked' } } })
+      .mockResolvedValueOnce({ status: 200, data: { candidates: [{ content: { parts: [{ text: 'Recovered' }] } }] } });
+    const result = await runGenerate({ prompt: 'Hi', model: 'model-a' });
+    expect(result.text).toBe('Recovered');
+    expect(disableKey).toHaveBeenCalledWith('test-api-key-12345678', 'key_leaked');
+    expect(generateContent.mock.calls[1][1]).toBe('model-a');
+  });
+
+  it('quarantines a revoked embedding credential before retrying', async () => {
+    embedContent.mockResolvedValueOnce({ status: 400, data: { error: { message: 'API key revoked' } } })
+      .mockResolvedValueOnce({ status: 200, data: { embedding: { values: [0.1] } }, latencyMs: 10 });
+    const result = await runEmbed({ text: 'Hi', model: 'embedding-model' });
+    expect(result.embedding.values).toEqual([0.1]);
+    expect(disableKey).toHaveBeenCalledWith('test-api-key-12345678', 'key_revoked');
+  });
+
+  it('quarantines a leaked image credential before model fallback', async () => {
+    generateImage.mockResolvedValueOnce({ status: 400, data: { error: { message: 'API key reported as leaked' } } })
+      .mockResolvedValueOnce({ status: 200, data: { candidates: [{ content: { parts: [{ inlineData: { data: 'image-data' } }] } }] }, latencyMs: 10 });
+    const result = await runImageGeneration({ prompt: 'An image' });
+    expect(result.images).toEqual(['image-data']);
+    expect(disableKey).toHaveBeenCalledWith('test-api-key-12345678', 'key_leaked');
+    expect(generateImage.mock.calls[1][1]).toBe('img-model');
   });
 
   it('should extract audio from inlineData when present in parts', async () => {

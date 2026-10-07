@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import { config } from '../config.js';
-import { getKey, returnKey, cooldownKey, disableKey, recordKeySuccess, recordKeyFailure, isPoolExhausted } from '../redis/keyPool.js';
+import { getKey, returnKey, cooldownKey, disableKey, recordKeySuccess, recordKeyFailure, isPoolExhausted, classifyKeyFailure } from '../redis/keyPool.js';
 import { recordSuccess, recordFailure, getBestModel } from '../redis/modelHealth.js';
 import { getActiveFallbackModels } from '../redis/modelConfig.js';
 import { streamGenerateContent } from '../services/gemini.js';
@@ -247,6 +247,19 @@ export async function streamRoutes(fastify) {
         await cooldownKey(key, config.cooldownMs * 2, '429_exhausted'); // Still cooldown the key that triggered it
       }
 
+      let errorData;
+      if ([400, 401, 403].includes(result.status)) {
+        try { errorData = await result.bodyStream?.json(); } catch { errorData = null; }
+      }
+      const keyFailure = classifyKeyFailure({ status: result.status, data: errorData });
+      if (keyFailure) {
+        await disableKey(key, keyFailure);
+        recordKeyFailure(lastKeyMasked).catch(() => {});
+        logError({ type: keyFailure, model: currentModel, key_masked: lastKeyMasked, message: `Status ${result.status}: credential rejected` });
+        recordFailureRateTick().catch(() => {});
+        continue;
+      }
+
       // Handle 5xx and explicit 4xx switches (400, 404)
       if ([500, 502, 503, 504, 400, 404].includes(result.status) || (result.status === 429 && model429Count >= 3)) {
         if (result.status !== 429) {
@@ -272,14 +285,6 @@ export async function streamRoutes(fastify) {
         fallbackIndex = fallbackModels.indexOf(currentModel);
         model429Count = 0; // Reset counter for new model
         continue;
-      }
-
-      if (result.status === 401 || result.status === 403) {
-        await disableKey(key, 'key_invalid');
-        recordKeyFailure(lastKeyMasked).catch(() => {});
-        logError({ type: 'key_invalid', model: currentModel, key_masked: lastKeyMasked, message: `Status ${result.status}: API Key is invalid` });
-        recordFailureRateTick().catch(() => {});
-        continue; // try next key
       }
 
       if (result.status !== 200) {

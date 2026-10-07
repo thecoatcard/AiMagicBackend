@@ -1,6 +1,6 @@
 import { randomUUID, createHash } from 'crypto';
 import { config } from '../config.js';
-import { getKey, returnKey, cooldownKey, disableKey, recordKeySuccess, recordKeyFailure, isPoolExhausted } from '../redis/keyPool.js';
+import { getKey, returnKey, cooldownKey, disableKey, recordKeySuccess, recordKeyFailure, isPoolExhausted, classifyKeyFailure } from '../redis/keyPool.js';
 import { generateContent, embedContent, batchEmbedContents, generateImage } from './gemini.js';
 import { recordSuccess, recordFailure, getBestModel } from '../redis/modelHealth.js';
 import { getActiveFallbackModels, getImageModels } from '../redis/modelConfig.js';
@@ -219,6 +219,16 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
       await cooldownKey(key, COOLDOWN_429, '429_exhausted'); // Still cooldown the key that triggered it
     }
 
+    const keyFailure = classifyKeyFailure(result);
+    if (keyFailure) {
+      await disableKey(key, keyFailure);
+      recordKeyFailure(lastKeyMasked).catch(() => {});
+      logError({ type: keyFailure, model: currentModel, key_masked: lastKeyMasked, message: `Status ${result.status}: credential rejected` });
+      recordFailureRateTick().catch(() => {});
+      lastError = keyFailure;
+      continue;
+    }
+
     // Handle 5xx and explicit 4xx switches (400, 404)
     if ([500, 502, 503, 504, 400, 404].includes(result.status) || (result.status === 429 && model429Count >= 3)) {
       if (result.status !== 429) await returnKey(key);
@@ -246,15 +256,6 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
       fallbackIndex = fallbackModels.indexOf(currentModel);
       model429Count = 0; // Reset counter for new model
       continue;
-    }
-
-    if (result.status === 401 || result.status === 403) {
-      await disableKey(key, 'key_invalid');
-      recordKeyFailure(lastKeyMasked).catch(() => {});
-      logError({ type: 'key_invalid', model: currentModel, key_masked: lastKeyMasked, message: `Status ${result.status}: API Key is invalid or revoked` });
-      recordFailureRateTick().catch(() => {});
-      lastError = 'key_invalid';
-      continue; // try next key
     }
 
     // Other API error (400, 404, etc.) — return immediately, no retry
@@ -353,6 +354,15 @@ export async function runEmbed({ text, model, requestId, userEmail } = {}) {
       break; // No fallback chain for embeddings yet
     }
 
+    const keyFailure = classifyKeyFailure(result);
+    if (keyFailure) {
+      await disableKey(key, keyFailure);
+      logError({ type: keyFailure, model: currentModel, key_masked: lastKeyMasked });
+      recordFailureRateTick().catch(() => {});
+      lastError = keyFailure;
+      continue;
+    }
+
     if ([500, 502, 503, 504, 400, 404].includes(result.status)) {
       await returnKey(key);
       await recordFailure(currentModel, result.status >= 500 ? '503' : 'other');
@@ -360,14 +370,6 @@ export async function runEmbed({ text, model, requestId, userEmail } = {}) {
       if (result.status === 503) model503Total.inc({ model: currentModel });
       recordFailureRateTick().catch(() => {});
       lastError = String(result.status);
-      continue;
-    }
-
-    if (result.status === 401 || result.status === 403) {
-      await disableKey(key, 'key_invalid');
-      logError({ type: 'key_invalid', model: currentModel, key_masked: lastKeyMasked });
-      recordFailureRateTick().catch(() => {});
-      lastError = 'key_invalid';
       continue;
     }
 
@@ -462,6 +464,14 @@ export async function runImageGeneration({ prompt, options = {}, requestId, user
       logError({ type: '429_EXHAUSTED', model: currentModel, key_masked: lastKeyMasked });
     }
 
+    const keyFailure = classifyKeyFailure(result);
+    if (keyFailure) {
+      recordKeyFailure(lastKeyMasked).catch(() => {});
+      await disableKey(key, keyFailure);
+      lastError = keyFailure;
+      continue;
+    }
+
     if ([500, 502, 503, 504, 400, 404].includes(result.status) || (result.status === 429 && model429Count >= 3)) {
       if (result.status !== 429) await returnKey(key);
       recordKeyFailure(lastKeyMasked).catch(() => {});
@@ -474,13 +484,6 @@ export async function runImageGeneration({ prompt, options = {}, requestId, user
       if (!currentModel) break;
       model429Count = 0;
       continue;
-    }
-
-    if (result.status === 401 || result.status === 403) {
-      recordKeyFailure(lastKeyMasked).catch(() => {});
-      await disableKey(key, 'key_invalid');
-      lastError = 'key_invalid';
-      continue; // try next key, same model
     }
 
     await returnKey(key);
