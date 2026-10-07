@@ -13,13 +13,14 @@ vi.mock('../../src/db/apiKeys.js', () => ({
   upsertApiKey: vi.fn().mockResolvedValue(undefined),
   removeApiKey: vi.fn().mockResolvedValue(undefined),
   getAllApiKeys: vi.fn().mockResolvedValue([]),
+  getApiKey: vi.fn().mockResolvedValue(null),
 }));
 
 import {
   getKey, returnKey, cooldownKey, disableKey, enableKey,
   addKey, removeKey, listKeys, isPoolExhausted,
   getPoolStats, clearAllCooldowns, restoreExpiredKeys,
-  classifyKeyFailure,
+  classifyKeyFailure, categorizeTestResult,
 } from '../../src/redis/keyPool.js';
 
 describe('key inventory security', () => {
@@ -40,10 +41,18 @@ describe('key inventory security', () => {
   });
 
   it('refuses to re-enable compromised credentials', async () => {
-    const { getAllApiKeys } = await import('../../src/db/apiKeys.js');
-    getAllApiKeys.mockResolvedValueOnce([{ key: 'leaked-key-123456', last_reason: 'key_leaked' }]);
+    const { getApiKey } = await import('../../src/db/apiKeys.js');
+    getApiKey.mockResolvedValueOnce({ key: 'leaked-key-123456', last_reason: 'key_leaked' });
     await expect(enableKey('leaked-key-123456')).rejects.toMatchObject({ statusCode: 409, code: 'KEY_QUARANTINED' });
     expect(mockRedis.eval).not.toHaveBeenCalled();
+  });
+
+  it('keeps a compromised verdict when a weaker failure follows', async () => {
+    const { getApiKey, upsertApiKey } = await import('../../src/db/apiKeys.js');
+    getApiKey.mockResolvedValueOnce({ key: 'leaked-key-123456', last_reason: 'key_leaked' });
+    mockRedis.eval.mockResolvedValue(1);
+    await disableKey('leaked-key-123456', 'admin');
+    expect(upsertApiKey).toHaveBeenCalledWith('leaked-key-123456', { status: 'disabled', reason: 'key_leaked' });
   });
 
   it('restores only expired cooldowns when the active pool is low', async () => {
@@ -58,20 +67,34 @@ describe('key inventory security', () => {
   it('distinguishes compromised keys from model permission errors', () => {
     expect(classifyKeyFailure({ status: 403, data: { error: { message: 'Your API key was reported as leaked' } } })).toBe('key_leaked');
     expect(classifyKeyFailure({ status: 400, data: { error: { message: 'API key revoked' } } })).toBe('key_revoked');
-    expect(classifyKeyFailure({ status: 403, data: { error: { message: 'Model access denied' } } })).toBeNull();
+    expect(classifyKeyFailure({ status: 403, data: { error: { message: 'Consumer has been suspended' } } })).toBe('key_revoked');
+    expect(classifyKeyFailure({ status: 400, data: { error: { message: 'API key not valid. Please pass a valid API key.' } } })).toBe('key_invalid');
+    expect(classifyKeyFailure({ status: 403, data: { error: { message: 'Blocked', details: [{ reason: 'API_KEY_SERVICE_BLOCKED' }] } } })).toBe('key_restricted');
+    expect(classifyKeyFailure({ status: 403, data: { error: { message: 'Requests from referer <empty> are blocked.' } } })).toBe('key_restricted');
+    expect(classifyKeyFailure({ status: 404, data: { error: { message: 'models/x is not found' } } })).toBeNull();
+    expect(classifyKeyFailure({ status: 503 })).toBeNull();
+  });
+
+  it('categorizes test outcomes', () => {
+    expect(categorizeTestResult(200, null)).toBe('healthy');
+    expect(categorizeTestResult(403, 'key_restricted')).toBe('restricted');
+    expect(categorizeTestResult(429, null)).toBe('rate_limited');
+    expect(categorizeTestResult(503, null)).toBe('inconclusive');
   });
 
   it('lists leaked and revoked keys without exposing raw credentials', async () => {
     const { getAllApiKeys } = await import('../../src/db/apiKeys.js');
     getAllApiKeys.mockResolvedValueOnce([
       { key: 'leaked-key-123456', last_reason: 'key_leaked' },
-      { key: 'revoked-key-123456', last_reason: 'key_revoked' },
+      { key: 'revoked-key-123456', last_reason: 'key_revoked', last_test: { ok: false, status: 400, reason: 'key_revoked', latency_ms: 50, model: 'm', at: new Date() } },
+      { key: 'restricted-key-123456', last_reason: 'key_restricted' },
     ]);
     mockRedis.lrange.mockResolvedValue([]);
-    mockRedis.zrangebyscore.mockResolvedValue(['leaked-key-123456', '253402300799000', 'revoked-key-123456', '253402300799000']);
+    mockRedis.zrangebyscore.mockResolvedValue(['leaked-key-123456', '253402300799000', 'revoked-key-123456', '253402300799000', 'restricted-key-123456', '253402300799000']);
     mockRedis.hgetall.mockResolvedValue({});
     const result = await listKeys();
-    expect(result.cooldown.map(key => key.status)).toEqual(['leaked', 'revoked']);
+    expect(result.cooldown.map(key => key.status)).toEqual(['leaked', 'revoked', 'restricted']);
+    expect(result.cooldown[1].lastTest).toMatchObject({ category: 'revoked', latency_ms: 50 });
     expect(JSON.stringify(result)).not.toContain('leaked-key-123456');
   });
 });

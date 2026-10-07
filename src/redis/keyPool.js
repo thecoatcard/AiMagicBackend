@@ -1,7 +1,7 @@
 import { getRedis } from './client.js';
 import { config } from '../config.js';
 import { notifyAdminKeyPoolLow } from '../services/notifications.js';
-import { upsertApiKey, removeApiKey as removeKeyFromDb, getAllApiKeys } from '../db/apiKeys.js';
+import { upsertApiKey, removeApiKey as removeKeyFromDb, getAllApiKeys, getApiKey } from '../db/apiKeys.js';
 import { createHash } from 'crypto';
 
 const KEY_POOL_LOW_THRESHOLD = parseInt(process.env.KEY_POOL_LOW_THRESHOLD || '5', 10);
@@ -13,6 +13,13 @@ const KEY_STATS_HASH = 'gemini_key_stats'; // Hash: maskedKey -> JSON { calls, s
 const KEY_REVERSE_MAP = 'gemini_key_reverse'; // Hash: maskedKey -> rawKey (O(1) reverse lookup)
 // Score used to permanently disable a key (year 9999)
 const DISABLED_SCORE = 253402300799000;
+
+const COMPROMISED_REASONS = new Set(['key_leaked', 'key_revoked']);
+const REASON_STATUS = { key_leaked: 'leaked', key_revoked: 'revoked', key_restricted: 'restricted', key_invalid: 'invalid' };
+const RESTRICTED_REASONS = new Set([
+  'API_KEY_SERVICE_BLOCKED', 'API_KEY_HTTP_REFERRER_BLOCKED', 'API_KEY_IP_ADDRESS_BLOCKED',
+  'API_KEY_ANDROID_APP_BLOCKED', 'API_KEY_IOS_APP_BLOCKED',
+]);
 
 // Atomic LREM-from-active + ZADD-to-cooldown. Prevents the key from being
 // "lost" if the process crashes between the two ops.
@@ -137,8 +144,10 @@ export async function disableKey(key, reason = 'unknown') {
   if (!rawKey) return; // Key not found in any pool
   await redis.eval(DISABLE_LUA, 2, ACTIVE_LIST, COOLDOWN_ZSET, rawKey, DISABLED_SCORE);
 
-  // Sync to MongoDB with reason
-  await upsertApiKey(rawKey, { status: 'disabled', reason });
+  // A compromised verdict must not be downgraded by a later, weaker failure reason.
+  const stored = await getApiKey(rawKey);
+  const finalReason = COMPROMISED_REASONS.has(stored?.last_reason) && !COMPROMISED_REASONS.has(reason) ? stored.last_reason : reason;
+  await upsertApiKey(rawKey, { status: 'disabled', reason: finalReason });
 
   checkPoolLow(redis).catch(() => {});
 }
@@ -168,8 +177,8 @@ export async function enableKey(key) {
   const redis = getRedis();
   const rawKey = await resolveRawKey(key);
   if (!rawKey) return; // Key not found in any pool
-  const stored = (await getAllApiKeys()).find(entry => entry.key === rawKey);
-  if (stored?.last_reason === 'key_leaked' || stored?.last_reason === 'key_revoked') {
+  const stored = await getApiKey(rawKey);
+  if (COMPROMISED_REASONS.has(stored?.last_reason)) {
     const error = new Error('Compromised credentials cannot be re-enabled; replace this key');
     error.statusCode = 409;
     error.code = 'KEY_QUARANTINED';
@@ -264,7 +273,11 @@ export async function listKeys() {
     redis.hgetall(KEY_STATS_HASH),
     getAllApiKeys(),
   ]);
-  const reasons = new Map(storedKeys.map(entry => [entry.key, entry.last_reason]));
+  const stored = new Map(storedKeys.map(entry => [entry.key, entry]));
+  const lastTestOf = k => {
+    const test = stored.get(k)?.last_test;
+    return test ? { category: categorizeTestResult(test.status, test.reason), ok: test.ok, status: test.status, latency_ms: test.latency_ms, model: test.model, tested_at: test.at } : null;
+  };
 
   const stats = {};
   for (const [k, v] of Object.entries(statsRaw)) {
@@ -278,6 +291,7 @@ export async function listKeys() {
       key: masked,
       status: 'active',
       stats: stats[masked] ?? defaultStats,
+      lastTest: lastTestOf(k),
     };
   });
 
@@ -287,12 +301,12 @@ export async function listKeys() {
     const score = parseInt(cooldownEntries[i + 1], 10);
     const permanent = score === DISABLED_SCORE;
     const masked = maskKey(k);
-    const reason = reasons.get(k) ?? null;
-    const status = reason === 'key_leaked' ? 'leaked' : reason === 'key_revoked' ? 'revoked' : 'disabled';
+    const reason = stored.get(k)?.last_reason ?? null;
     cooldown.push({
       key: masked,
-      status: permanent ? status : 'cooldown',
+      status: permanent ? (REASON_STATUS[reason] ?? 'disabled') : 'cooldown',
       reason,
+      lastTest: lastTestOf(k),
       cooldownRemainingMs: permanent ? null : Math.max(0, score - now),
       stats: stats[masked] ?? defaultStats,
     });
@@ -304,11 +318,21 @@ export async function listKeys() {
 export function classifyKeyFailure(result) {
   const error = result.data?.error;
   const message = error?.message ?? '';
-  const reasons = (error?.details ?? []).map(detail => detail.reason);
+  const reasons = (error?.details ?? []).map(detail => detail?.reason).filter(Boolean);
   if (/leaked/i.test(message)) return 'key_leaked';
-  if (/revoked|expired/i.test(message) || reasons.includes('API_KEY_EXPIRED')) return 'key_revoked';
+  if (/revoked|expired|suspended/i.test(message) || reasons.some(r => r === 'API_KEY_EXPIRED' || r === 'CONSUMER_SUSPENDED')) return 'key_revoked';
   if (result.status === 401 || reasons.includes('API_KEY_INVALID') || /api key not valid|invalid api key/i.test(message)) return 'key_invalid';
+  if (reasons.some(r => RESTRICTED_REASONS.has(r)) || /are blocked|referr?er|ip address|restricted/i.test(message)) return 'key_restricted';
+  // Gemini only returns 403 for credential/project permission problems.
+  if (result.status === 403) return 'key_restricted';
   return null;
+}
+
+export function categorizeTestResult(status, reason) {
+  if (status === 200) return 'healthy';
+  if (reason) return REASON_STATUS[reason];
+  if (status === 429) return 'rate_limited';
+  return 'inconclusive';
 }
 
 /**

@@ -269,7 +269,10 @@ vi.mock('../../../src/db/gridfs.js', () => ({
   })),
 }));
 
-vi.mock('../../../src/db/apiKeys.js', () => ({}));
+vi.mock('../../../src/db/apiKeys.js', () => ({
+  recordKeyTest: vi.fn().mockResolvedValue(undefined),
+  getApiKey: vi.fn().mockResolvedValue(null),
+}));
 vi.mock('../../../src/db/auditLog.js', () => ({
   writeAuditLog: vi.fn(),
   listAuditLog: vi.fn(async () => ({ logs: [], total: 0 })),
@@ -366,6 +369,7 @@ vi.mock('../../../src/services/dailySnapshot.js', () => ({}));
 // Redis sub-module mocks
 vi.mock('../../../src/redis/keyPool.js', async (importOriginal) => ({
   classifyKeyFailure: (await importOriginal()).classifyKeyFailure,
+  categorizeTestResult: (await importOriginal()).categorizeTestResult,
   resolveRawKey: vi.fn(async () => 'test-key-123456789'),
   removeKey: vi.fn(async () => ({ removed: true })),
   listKeys: vi.fn(async () => [{ key: 'AIza...xxxx', status: 'active' }]),

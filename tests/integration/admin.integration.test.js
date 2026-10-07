@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import { buildTestServer, makeToken, makeAdminToken, makeOwnerToken } from './helpers/setup.js';
-import { resolveRawKey, removeKey, disableKey } from '../../src/redis/keyPool.js';
+import { resolveRawKey, removeKey, disableKey, enableKey } from '../../src/redis/keyPool.js';
 import { generateContent } from '../../src/services/gemini.js';
 
 let app;
@@ -40,6 +40,39 @@ describe('Admin Routes Integration', () => {
       vi.mocked(resolveRawKey).mockResolvedValueOnce(null);
       const res = await app.inject({ method: 'POST', url: `/v1/keys/${encodeURIComponent(masked)}/test`, headers: auth, payload: {} });
       expect(res.statusCode).toBe(404);
+    });
+
+    it('bulk tests keys and summarizes detected categories', async () => {
+      const other = 'AIza…123456…7890';
+      vi.mocked(generateContent)
+        .mockResolvedValueOnce({ status: 200 })
+        .mockResolvedValueOnce({ status: 403, data: { error: { message: 'Blocked', details: [{ reason: 'API_KEY_IP_ADDRESS_BLOCKED' }] } } });
+      const res = await app.inject({ method: 'POST', url: '/v1/keys/bulk-test', headers: auth, payload: { keys: [masked, other], model: 'test-model' } });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.summary).toEqual({ healthy: 1, restricted: 1 });
+      expect(body.results.map(r => r.key)).toEqual([masked, other]);
+      expect(disableKey).toHaveBeenCalledWith('test-key-123456789', 'key_restricted');
+      expect(res.body).not.toContain('test-key-123456789');
+    });
+
+    it('rejects oversized or raw-key bulk test requests', async () => {
+      for (const keys of [Array.from({ length: 101 }, (_, i) => `AIza…${String(i).padStart(6, 'a')}…7890`), ['raw-secret-key']]) {
+        const res = await app.inject({ method: 'POST', url: '/v1/keys/bulk-test', headers: auth, payload: { keys } });
+        expect(res.statusCode).toBe(400);
+      }
+    });
+
+    it('bulk enable skips quarantined keys without failing the batch', async () => {
+      const quarantined = Object.assign(new Error('quarantined'), { code: 'KEY_QUARANTINED', statusCode: 409 });
+      vi.mocked(enableKey).mockResolvedValueOnce(undefined).mockRejectedValueOnce(quarantined);
+      const other = 'AIza…123456…7890';
+      const res = await app.inject({ method: 'POST', url: '/v1/keys/bulk-enable', headers: auth, payload: { keys: [masked, other] } });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().results).toEqual([
+        { key: masked, status: 'enabled' },
+        { key: other, status: 'skipped', error: 'quarantined' },
+      ]);
     });
 
     it('rejects model path injection', async () => {

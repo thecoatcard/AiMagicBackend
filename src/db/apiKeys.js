@@ -28,6 +28,19 @@ export async function removeApiKey(key) {
   await db.collection(COLLECTION).deleteOne({ key });
 }
 
+export async function getApiKey(key) {
+  const db = await getDb();
+  return db.collection(COLLECTION).findOne({ key });
+}
+
+export async function recordKeyTest(key, { ok, status, reason, model, latencyMs }) {
+  const db = await getDb();
+  await db.collection(COLLECTION).updateOne(
+    { key },
+    { $set: { last_test: { ok, status, reason, model, latency_ms: latencyMs, at: new Date() } } }
+  );
+}
+
 /**
  * Retrieve all API keys from the database.
  */
