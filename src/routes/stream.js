@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 import { config } from '../config.js';
 import { getKey, returnKey, cooldownKey, disableKey, recordKeySuccess, recordKeyFailure, isPoolExhausted, classifyKeyFailure } from '../redis/keyPool.js';
 import { recordSuccess, recordFailure, getBestModel } from '../redis/modelHealth.js';
-import { getActiveFallbackModels } from '../redis/modelConfig.js';
+import { getActiveFallbackModels, ALL_SUPPORTED_MODELS } from '../redis/modelConfig.js';
 import { streamGenerateContent } from '../services/gemini.js';
 import { logRequest, logError } from '../db/logger.js';
 import { checkUserRateLimit, refundQuota } from '../middleware/rateLimiter.js';
@@ -144,6 +144,13 @@ export async function streamRoutes(fastify) {
       }
     }
 
+    // Validate user-supplied model before wasting an upstream API call
+    if (model && !ALL_SUPPORTED_MODELS.includes(model)) {
+      if (userEmail) refundQuota(userEmail, 1).catch(() => {});
+      reply.status(400);
+      return { error: `Model '${model}' is not supported`, code: 'INVALID_MODEL', request_id: requestId };
+    }
+
     // ── Model selection — mirrors orchestrator.js logic ──────────────────────
     const fallbackModels = await getActiveFallbackModels();
     let currentModel = model ?? await getBestModel(fallbackModels);
@@ -158,6 +165,11 @@ export async function streamRoutes(fastify) {
 
     let fallbackIndex = fallbackModels.indexOf(currentModel); // -1 = custom model
 
+    // Wall-clock request deadline — caps total retry time regardless of how
+    // many attempts remain.
+    const deadline = Date.now() + config.maxRetryWallMs;
+    let deadlineExceeded = false;
+
     // Shared retry tracking (for logRequest parity with /v1/generate)
     let retries = 0;
     let lastKeyMasked = null;
@@ -169,6 +181,14 @@ export async function streamRoutes(fastify) {
 
     for (let attempt = 0; attempt < config.maxRetries; attempt++) {
       if (attempt > 0) retries++;
+
+      // Wall-clock deadline guard
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        deadlineExceeded = true;
+        break;
+      }
+      const effectiveTimeoutMs = Math.min(config.requestTimeoutMs, Math.max(1000, remaining));
 
       // Always destroy any stream left over from the previous iteration —
       // prevents socket leaks if a branch above forgot to clean it up.
@@ -196,7 +216,7 @@ export async function streamRoutes(fastify) {
 
       let result;
       try {
-        result = await streamGenerateContent(key, currentModel, prompt ?? '', options);
+        result = await streamGenerateContent(key, currentModel, prompt ?? '', options, effectiveTimeoutMs);
         // Track for guaranteed teardown next iteration / on success.
         activeBodyStream = result.bodyStream ?? null;
         // Prevent "Unhandled 'error' event" crash if the stream is destroyed or aborted
@@ -356,8 +376,20 @@ export async function streamRoutes(fastify) {
       let inThoughtBlock = false;
       const isGemma4 = currentModel.startsWith('gemma-4');
 
+      // Stream idle timeout: if no data arrives for streamIdleTimeoutMs, destroy the stream.
+      // This catches the case where Gemini returns 200 headers but never sends body data.
+      let idleTimer = setTimeout(() => {
+        result.bodyStream.destroy(Object.assign(new Error('stream_idle_timeout'), { code: 'STREAM_IDLE_TIMEOUT' }));
+      }, config.streamIdleTimeoutMs);
+
       try {
         for await (const chunk of result.bodyStream) {
+          // Reset idle timer on each received chunk
+          clearTimeout(idleTimer);
+          idleTimer = setTimeout(() => {
+            result.bodyStream.destroy(Object.assign(new Error('stream_idle_timeout'), { code: 'STREAM_IDLE_TIMEOUT' }));
+          }, config.streamIdleTimeoutMs);
+
           if (res.writableEnded) break;
           if (!chunk || chunk.length === 0) continue;
 
@@ -486,12 +518,16 @@ export async function streamRoutes(fastify) {
           }
         }
       } catch (streamErr) {
+        clearTimeout(idleTimer);
         streamStatus = 'error';
         if (!res.destroyed && !res.writableEnded) {
-          const errMsg = streamErr.message || 'Unknown stream error';
-          res.write(`data: ${JSON.stringify({ error: `Stream interrupted: ${errMsg}`, code: 'STREAM_ERROR' })}\n\n`);
+          const isIdleTimeout = streamErr.code === 'STREAM_IDLE_TIMEOUT';
+          const errMsg = isIdleTimeout ? 'Stream stalled: no data received from provider' : (streamErr.message || 'Unknown stream error');
+          const errCode = isIdleTimeout ? 'STREAM_IDLE_TIMEOUT' : 'STREAM_ERROR';
+          res.write(`data: ${JSON.stringify({ error: `Stream interrupted: ${errMsg}`, code: errCode })}\n\n`);
         }
       } finally {
+        clearTimeout(idleTimer);
         if (!res.writableEnded) res.end();
 
         // ── Hivemind: store prompt+response for future context (fire-and-forget)
@@ -548,10 +584,14 @@ export async function streamRoutes(fastify) {
       } catch { /* noop */ }
       activeBodyStream = null;
     }
-    logRequest({ request_id: requestId, model: currentModel, api_key_masked: lastKeyMasked, latency_ms: 0, status: 'exhausted', retries, prompt_length: promptLength, user_email: userEmail });
-    requestsTotal.inc({ model: currentModel ?? 'unknown', status: 'exhausted' });
+    const exitStatus = deadlineExceeded ? 'deadline_exceeded' : 'exhausted';
+    logRequest({ request_id: requestId, model: currentModel, api_key_masked: lastKeyMasked, latency_ms: 0, status: exitStatus, retries, prompt_length: promptLength, user_email: userEmail });
+    requestsTotal.inc({ model: currentModel ?? 'unknown', status: exitStatus });
     if (userEmail) refundQuota(userEmail, 1).catch(() => {});
     reply.status(503);
+    if (deadlineExceeded) {
+      return { error: 'Request deadline exceeded', code: 'DEADLINE_EXCEEDED', request_id: requestId };
+    }
     return { error: 'All retries exhausted', code: 'RETRIES_EXHAUSTED', request_id: requestId };
   });
 }

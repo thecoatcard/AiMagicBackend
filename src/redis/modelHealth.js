@@ -1,28 +1,52 @@
 import { getRedis } from './client.js';
 
 const PREFIX = 'model_health:';
+const BUCKET_MS = 900_000;  // 15-minute time buckets
+const BUCKET_WINDOW = 4;    // Look back 4 buckets (1 hour) for windowed scoring
+const MIN_RECENT_SAMPLES = 3; // Fall back to lifetime stats below this threshold
 
 function hashKey(model) {
   return `${PREFIX}${model}`;
 }
 
+function currentBucketTs() {
+  return Math.floor(Date.now() / BUCKET_MS);
+}
+
+function bucketKey(model, bucket) {
+  return `model_health_bucket:${model}:${bucket}`;
+}
+
 /**
  * Record a successful generation.
+ * Writes to both lifetime counters and the current time bucket.
  * @param {string} model
  * @param {number} latencyMs
  */
 export async function recordSuccess(model, latencyMs) {
   const redis = getRedis();
   const key = hashKey(model);
-  await redis.multi()
-    .hincrby(key, 'success', 1)
-    .hincrby(key, 'total_latency_ms', Math.round(latencyMs))
-    .hset(key, 'last_updated', Date.now())
-    .exec();
+  const bucket = currentBucketTs();
+  const bkey = bucketKey(model, bucket);
+  // Bucket expires after 2 bucket periods (30 min) so old data auto-clears
+  const bucketExpireAt = Math.round(((bucket + 2) * BUCKET_MS) / 1000);
+
+  await Promise.all([
+    redis.multi()
+      .hincrby(key, 'success', 1)
+      .hincrby(key, 'total_latency_ms', Math.round(latencyMs))
+      .hset(key, 'last_updated', Date.now())
+      .exec(),
+    redis.multi()
+      .hincrby(bkey, 'success', 1)
+      .expireat(bkey, bucketExpireAt)
+      .exec(),
+  ]);
 }
 
 /**
  * Record a failed generation.
+ * Writes to both lifetime counters and the current time bucket.
  * @param {string} model
  * @param {'503'|'timeout'|'other'} type
  */
@@ -32,15 +56,23 @@ export async function recordFailure(model, type) {
   const field = type === '503' ? 'fail_503'
     : type === 'timeout' ? 'fail_timeout'
     : 'fail_other';
-  await redis.multi()
-    .hincrby(key, field, 1)
-    .hset(key, 'last_updated', Date.now())
-    .exec();
 
-  // Invalidate the in-process best-model cache so subsequent callers don't
-  // keep getting routed to a model we just observed degrading. We only
-  // invalidate for "model is degraded" reasons — 429 is a key-level issue
-  // (handled by key cooldown), and 'other' is too generic to act on.
+  const bucket = currentBucketTs();
+  const bkey = bucketKey(model, bucket);
+  const bucketExpireAt = Math.round(((bucket + 2) * BUCKET_MS) / 1000);
+
+  await Promise.all([
+    redis.multi()
+      .hincrby(key, field, 1)
+      .hset(key, 'last_updated', Date.now())
+      .exec(),
+    redis.multi()
+      .hincrby(bkey, field, 1)
+      .expireat(bkey, bucketExpireAt)
+      .exec(),
+  ]);
+
+  // Invalidate in-process best-model cache for degraded-model reasons
   if (DEGRADED_REASONS.has(String(type))) {
     invalidateBestModelCache();
   }
@@ -84,18 +116,19 @@ export async function listAllModels() {
 }
 
 /**
- * Reset all stats for a model.
+ * Reset all stats for a model (lifetime and buckets).
  */
 export async function resetModelStats(model) {
-  await getRedis().del(hashKey(model));
+  const redis = getRedis();
+  await redis.del(hashKey(model));
+  // Bucket keys auto-expire; no need to scan and delete them
 }
 
 /**
  * Pick the best model from a list of candidates based on live health scores.
- * Falls back to the first candidate if no health data exists yet.
- * Caches result for 30s to avoid recalculating on every request.
- *
- * Score = success_rate - (fail_503_rate * 0.3) - (fail_timeout_rate * 0.2)
+ * Uses time-windowed (last 1 hour) stats when enough samples exist, falling
+ * back to lifetime stats for cold/low-traffic models.
+ * Cache TTL reduced to 5s (from 30s) to keep multi-instance staleness bounded.
  *
  * @param {string[]} candidates
  * @returns {Promise<string>}
@@ -113,32 +146,60 @@ export async function getBestModel(candidates) {
   }
 
   const redis = getRedis();
+  const currentBucket = currentBucketTs();
   const pipeline = redis.pipeline();
-  for (const model of candidates) pipeline.hgetall(hashKey(model));
+
+  // For each candidate: fetch lifetime hash + BUCKET_WINDOW recent bucket hashes
+  for (const model of candidates) {
+    pipeline.hgetall(hashKey(model)); // offset 0: lifetime
+    for (let i = 0; i < BUCKET_WINDOW; i++) {
+      pipeline.hgetall(bucketKey(model, currentBucket - i)); // offsets 1..BUCKET_WINDOW
+    }
+  }
   const results = await pipeline.exec();
 
   let best = candidates[0];
   let bestScore = -Infinity;
 
   for (let i = 0; i < candidates.length; i++) {
-    const raw = results[i][1];
-    const score = healthScore(raw);
+    const offset = i * (BUCKET_WINDOW + 1);
+    const lifetimeRaw = results[offset][1];
+
+    // Aggregate recent bucket data
+    let rSuccess = 0, rFail503 = 0, rFailTimeout = 0, rFailOther = 0;
+    for (let j = 1; j <= BUCKET_WINDOW; j++) {
+      const raw = results[offset + j][1];
+      if (!raw) continue;
+      rSuccess += parseInt(raw.success || '0', 10);
+      rFail503 += parseInt(raw.fail_503 || '0', 10);
+      rFailTimeout += parseInt(raw.fail_timeout || '0', 10);
+      rFailOther += parseInt(raw.fail_other || '0', 10);
+    }
+
+    const recentTotal = rSuccess + rFail503 + rFailTimeout + rFailOther;
+    let score;
+    if (recentTotal >= MIN_RECENT_SAMPLES) {
+      // Sufficient recent data — windowed score accurately reflects current state
+      score = windowedHealthScore({ success: rSuccess, fail_503: rFail503, fail_timeout: rFailTimeout, fail_other: rFailOther });
+    } else {
+      // Not enough recent data — fall back to lifetime Bayesian score
+      score = healthScore(lifetimeRaw);
+    }
+
     if (score > bestScore) {
       bestScore = score;
       best = candidates[i];
     }
   }
 
-  // Cache for 30 seconds
-  _bestModelCache = { key: cacheKey, model: best, expiresAt: Date.now() + 30_000 };
-
+  // Cache for 5s (down from 30s) to limit cross-process staleness
+  _bestModelCache = { key: cacheKey, model: best, expiresAt: Date.now() + 5_000 };
   return best;
 }
 
 /**
- * Clear the in-process best-model cache. Called by recordFailure() when a
- * model fails for a "degraded" reason so the next caller can re-evaluate
- * the candidates instead of seeing the just-failed model recommended again.
+ * Clear the in-process best-model cache.
+ * Called by recordFailure() on degraded-model events and by tests.
  */
 export function invalidateBestModelCache() {
   _bestModelCache = { key: null, model: null, expiresAt: 0 };
@@ -146,9 +207,11 @@ export function invalidateBestModelCache() {
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
+/**
+ * Lifetime Bayesian health score.
+ * Smoothing with Beta(5,5) prior so cold models score ~0.5, not 1.0.
+ */
 function healthScore(raw) {
-  // Bayesian smoothing: cold or low-N models score ~0.5, not 1.0,
-  // so we don't over-trust a model with no observed traffic.
   if (!raw || Object.keys(raw).length === 0) return 0.5;
 
   const success = parseInt(raw.success || '0', 10);
@@ -157,14 +220,25 @@ function healthScore(raw) {
   const failOther = parseInt(raw.fail_other || '0', 10);
   const total = success + fail503 + failTimeout + failOther;
 
-  // Smoothed success rate with a weak Beta(5, 5) prior.
   const successRate = (success + 5) / (total + 10);
-
   if (total === 0) return successRate;
 
   const rate503 = fail503 / total;
   const rateTimeout = failTimeout / total;
 
+  return successRate - (rate503 * 0.3) - (rateTimeout * 0.2);
+}
+
+/**
+ * Windowed health score (recent data only).
+ * Uses a lighter Beta(2,2) prior since data is already time-filtered.
+ */
+function windowedHealthScore({ success, fail_503, fail_timeout, fail_other }) {
+  const total = success + fail_503 + fail_timeout + fail_other;
+  if (total === 0) return 0.5;
+  const successRate = (success + 2) / (total + 4);
+  const rate503 = fail_503 / total;
+  const rateTimeout = fail_timeout / total;
   return successRate - (rate503 * 0.3) - (rateTimeout * 0.2);
 }
 

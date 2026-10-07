@@ -21,7 +21,7 @@ const pool = new Pool(GEMINI_BASE, {
  * @returns {{ status: number, data: object, latencyMs: number }}
  * @throws {{ code: 'TIMEOUT' }} on request timeout
  */
-export async function generateContent(key, model, prompt, options = {}) {
+export async function generateContent(key, model, prompt, options = {}, timeoutMs) {
   const body = buildRequestBody(prompt, options);
   const start = Date.now();
 
@@ -30,12 +30,12 @@ export async function generateContent(key, model, prompt, options = {}) {
     ({ statusCode, body: resBody } = await pool.request({
       method: 'POST',
       path: `/v1beta/models/${model}:generateContent`,
-      headers: { 
+      headers: {
         'content-type': 'application/json',
-        'x-goog-api-key': key 
+        'x-goog-api-key': key
       },
       body,
-      signal: AbortSignal.timeout(config.requestTimeoutMs),
+      signal: AbortSignal.timeout(timeoutMs ?? config.requestTimeoutMs),
     }));
   } catch (err) {
     if (isTimeoutError(err)) {
@@ -50,9 +50,9 @@ export async function generateContent(key, model, prompt, options = {}) {
     const rawData = await resBody.json();
     return { status: statusCode, data: rawData, latencyMs: Date.now() - start };
   } catch {
-    // Non-JSON upstream response — ensure body is drained before returning
+    // Non-JSON upstream response — drain body and surface a parse error flag
     await resBody.dump().catch(() => {});
-    return { status: statusCode, data: {}, latencyMs: Date.now() - start };
+    return { status: statusCode, data: null, parseError: true, latencyMs: Date.now() - start };
   }
 }
 
@@ -63,7 +63,7 @@ export async function generateContent(key, model, prompt, options = {}) {
  * @returns {{ status: number, bodyStream: Readable }}
  * @throws {{ code: 'TIMEOUT' }} on timeout
  */
-export async function streamGenerateContent(key, model, prompt, options = {}) {
+export async function streamGenerateContent(key, model, prompt, options = {}, timeoutMs) {
   const body = buildRequestBody(prompt, options);
 
   let statusCode, bodyStream;
@@ -71,11 +71,12 @@ export async function streamGenerateContent(key, model, prompt, options = {}) {
     ({ statusCode, body: bodyStream } = await pool.request({
       method: 'POST',
       path: `/v1beta/models/${model}:streamGenerateContent?alt=sse`,
-      headers: { 
+      headers: {
         'content-type': 'application/json',
         'x-goog-api-key': key
       },
       body,
+      signal: AbortSignal.timeout(timeoutMs ?? config.requestTimeoutMs),
     }));
   } catch (err) {
     if (isTimeoutError(err)) {
@@ -98,7 +99,7 @@ export async function streamGenerateContent(key, model, prompt, options = {}) {
  * @returns {{ status: number, data: object, latencyMs: number }}
  * @throws {{ code: 'TIMEOUT' }} on request timeout
  */
-export async function embedContent(key, model, text) {
+export async function embedContent(key, model, text, timeoutMs) {
   const start = Date.now();
   const body = JSON.stringify({
     content: { parts: [{ text }] }
@@ -109,12 +110,12 @@ export async function embedContent(key, model, text) {
     ({ statusCode, body: resBody } = await pool.request({
       method: 'POST',
       path: `/v1beta/models/${model}:embedContent`,
-      headers: { 
+      headers: {
         'content-type': 'application/json',
-        'x-goog-api-key': key 
+        'x-goog-api-key': key
       },
       body,
-      signal: AbortSignal.timeout(config.requestTimeoutMs),
+      signal: AbortSignal.timeout(timeoutMs ?? config.requestTimeoutMs),
     }));
   } catch (err) {
     if (isTimeoutError(err)) {
@@ -129,8 +130,8 @@ export async function embedContent(key, model, text) {
     const rawData = await resBody.json();
     return { status: statusCode, data: rawData, latencyMs: Date.now() - start };
   } catch {
-    await resBody.dump();
-    return { status: statusCode, data: {}, latencyMs: Date.now() - start };
+    await resBody.dump().catch(() => {});
+    return { status: statusCode, data: null, parseError: true, latencyMs: Date.now() - start };
   }
 }
 
@@ -143,7 +144,7 @@ export async function embedContent(key, model, text) {
  * @returns {{ status: number, data: object, latencyMs: number }}
  * @throws {{ code: 'TIMEOUT' }} on request timeout
  */
-export async function batchEmbedContents(key, model, texts) {
+export async function batchEmbedContents(key, model, texts, timeoutMs) {
   const start = Date.now();
   // Note: some models require "models/" prefix in the inner request
   const requests = texts.map(text => ({
@@ -157,12 +158,12 @@ export async function batchEmbedContents(key, model, texts) {
     ({ statusCode, body: resBody } = await pool.request({
       method: 'POST',
       path: `/v1beta/models/${model}:batchEmbedContents`,
-      headers: { 
+      headers: {
         'content-type': 'application/json',
-        'x-goog-api-key': key 
+        'x-goog-api-key': key
       },
       body,
-      signal: AbortSignal.timeout(config.requestTimeoutMs),
+      signal: AbortSignal.timeout(timeoutMs ?? config.requestTimeoutMs),
     }));
   } catch (err) {
     if (isTimeoutError(err)) {
@@ -177,8 +178,8 @@ export async function batchEmbedContents(key, model, texts) {
     const rawData = await resBody.json();
     return { status: statusCode, data: rawData, latencyMs: Date.now() - start };
   } catch {
-    await resBody.dump();
-    return { status: statusCode, data: {}, latencyMs: Date.now() - start };
+    await resBody.dump().catch(() => {});
+    return { status: statusCode, data: null, parseError: true, latencyMs: Date.now() - start };
   }
 }
 
@@ -240,7 +241,7 @@ export async function generateImage(key, model, prompt, options = {}) {
     return { status: statusCode, data: rawData, latencyMs: Date.now() - start };
   } catch {
     await resBody.dump().catch(() => {});
-    return { status: statusCode, data: {}, latencyMs: Date.now() - start };
+    return { status: statusCode, data: null, parseError: true, latencyMs: Date.now() - start };
   }
 }
 

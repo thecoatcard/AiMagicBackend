@@ -14,6 +14,8 @@ export const config = {
   cooldownMs: parseInt(process.env.COOLDOWN_MS || '60000', 10),
   maxRetries: parseInt(process.env.MAX_RETRIES || '8', 10),
   requestTimeoutMs: parseInt(process.env.REQUEST_TIMEOUT_MS || '180000', 10),
+  maxRetryWallMs: parseInt(process.env.MAX_RETRY_WALL_MS || '60000', 10),
+  streamIdleTimeoutMs: parseInt(process.env.STREAM_IDLE_TIMEOUT_MS || '30000', 10),
   mongodbUri: process.env.MONGODB_URI || 'mongodb://localhost:27017',
   mongodbName: process.env.MONGODB_NAME || 'keymanagement',
   workerConcurrency: parseInt(process.env.WORKER_CONCURRENCY || '1', 10),

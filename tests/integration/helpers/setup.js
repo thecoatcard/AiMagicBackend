@@ -396,6 +396,8 @@ vi.mock('../../../src/redis/modelHealth.js', () => ({
 }));
 
 vi.mock('../../../src/redis/modelConfig.js', () => ({
+  ALL_SUPPORTED_MODELS: ['test-model', 'fallback-1'],
+  DEFAULT_FALLBACK_MODELS: ['test-model', 'fallback-1'],
   getModelConfig: vi.fn(async () => ({ primary: 'test-model', fallback: ['fallback-1'] })),
   updateModelConfig: vi.fn(),
   addFallbackModel: vi.fn(),
@@ -403,6 +405,7 @@ vi.mock('../../../src/redis/modelConfig.js', () => ({
   getFallbackModels: vi.fn(async () => ['test-model', 'fallback-1']),
   getActiveFallbackModels: vi.fn(async () => ['test-model', 'fallback-1']),
   getImageModels: vi.fn(async () => ['test-model']),
+  invalidateFallbackModelCache: vi.fn(),
 }));
 
 vi.mock('../../../src/redis/sync.js', () => ({}));

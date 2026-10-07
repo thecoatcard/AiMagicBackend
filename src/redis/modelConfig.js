@@ -48,12 +48,27 @@ export async function getDisabledModels() {
   try { return JSON.parse(raw); } catch { return []; }
 }
 
+// In-process cache for the active fallback model list (60s TTL).
+// Admin changes call invalidateFallbackModelCache() to force a refresh.
+let _fallbackModelCache = { models: null, expiresAt: 0 };
+
 /**
  * Get only the fallback models that are not disabled.
+ * Caches result for 60s in-process to avoid two Redis round-trips per request.
  */
 export async function getActiveFallbackModels() {
+  if (_fallbackModelCache.models && Date.now() < _fallbackModelCache.expiresAt) {
+    return _fallbackModelCache.models;
+  }
   const [all, disabled] = await Promise.all([getFallbackModels(), getDisabledModels()]);
-  return all.filter(m => !disabled.includes(m));
+  const active = all.filter(m => !disabled.includes(m));
+  _fallbackModelCache = { models: active, expiresAt: Date.now() + 60_000 };
+  return active;
+}
+
+/** Invalidate the in-process fallback model cache (call after any admin model change). */
+export function invalidateFallbackModelCache() {
+  _fallbackModelCache = { models: null, expiresAt: 0 };
 }
 
 /**
@@ -100,7 +115,7 @@ export async function updateModelConfig({ primaryModel, fallbackModels, disabled
 
   await getRedis().hset(CONFIG_KEY, 'fallback_models', JSON.stringify(models));
   await getRedis().hset(CONFIG_KEY, 'disabled_models', JSON.stringify(disabled));
-  
+  invalidateFallbackModelCache();
   // Persist to MongoDB
   await savePersistentConfig('models', { fallback_models: models, disabled_models: disabled });
 }
@@ -133,6 +148,7 @@ export async function addFallbackModel(model, position = 'end') {
   if (position === 'start') models.unshift(model);
   else models.push(model);
   await getRedis().hset(CONFIG_KEY, 'fallback_models', JSON.stringify(models));
+  invalidateFallbackModelCache();
   await savePersistentConfig('models', { fallback_models: models });
   return { added: true };
 }
@@ -150,6 +166,7 @@ export async function removeFallbackModel(model) {
   
   await getRedis().hset(CONFIG_KEY, 'fallback_models', JSON.stringify(models));
   await getRedis().hset(CONFIG_KEY, 'disabled_models', JSON.stringify(disabled));
+  invalidateFallbackModelCache();
   await savePersistentConfig('models', { fallback_models: models, disabled_models: disabled });
   return { removed: true };
 }
@@ -171,6 +188,7 @@ export async function toggleFallbackModelStatus(model, disabled) {
   }
   
   await getRedis().hset(CONFIG_KEY, 'disabled_models', JSON.stringify(disabledList));
+  invalidateFallbackModelCache();
   await savePersistentConfig('models', { fallback_models: models, disabled_models: disabledList });
   return { updated: true };
 }

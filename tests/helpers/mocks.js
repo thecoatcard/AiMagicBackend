@@ -56,6 +56,7 @@ export function createMockRedis() {
     hincrby: vi.fn().mockReturnThis(),
     hgetall: vi.fn().mockReturnThis(),
     expire: vi.fn().mockReturnThis(),
+    expireat: vi.fn().mockReturnThis(),
     incr: vi.fn().mockReturnThis(),
     exec: vi.fn().mockResolvedValue([]),
   };

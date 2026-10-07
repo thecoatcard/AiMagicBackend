@@ -39,10 +39,27 @@ export function maskKey(key) {
  *  - User omits model      → pick the healthiest model in the fallback chain.
  *
  * The fallback chain is admin-configurable via PATCH /v1/models/config.
+ *
+ * ## Retry / failure policy
+ * | Status / condition          | Action                                         |
+ * |-----------------------------|------------------------------------------------|
+ * | 200 + usable content        | Return success                                 |
+ * | 200 + empty content         | Return EMPTY_RESPONSE (502) — no retry         |
+ * | Non-JSON response           | Switch model, retry                            |
+ * | 429 (< 3 per model)         | Cooldown key, rotate key, same model           |
+ * | 429 (≥ 3 per model)         | Cooldown key, switch model                     |
+ * | 401 / 403 (key error)       | Disable key, rotate key (classifyKeyFailure)   |
+ * | 400 / 404                   | Switch model (model-capability mismatch)       |
+ * | 500 / 502 / 503 / 504       | Switch model                                   |
+ * | TIMEOUT                     | Switch model                                   |
+ * | Wall-clock deadline reached | Return DEADLINE_EXCEEDED (503)                 |
+ * | Retries exhausted           | Return RETRIES_EXHAUSTED (503)                 |
+ * | Other status code           | Return immediately (no retry)                  |
  */
 export async function runGenerate({ prompt, model, options = {}, requestId, userEmail } = {}) {
   const reqId = requestId ?? randomUUID();
   const wallStart = Date.now();
+  const deadline = Date.now() + config.maxRetryWallMs;
 
   // ── Hivemind: retrieve relevant prior context for this user ────────────
   let hivemindRuntimeOn = true;
@@ -92,9 +109,19 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
   let retries = 0;
   let lastKeyMasked = null;
   let model429Count = 0; // Consecutive 429 tracking for currentModel
+  let deadlineExceeded = false;
 
   for (let attempt = 0; attempt < config.maxRetries; attempt++) {
     if (attempt > 0) retries++;
+
+    // Wall-clock deadline guard: abort before starting a new attempt if time is up
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      deadlineExceeded = true;
+      break;
+    }
+    // Respect both the per-attempt config timeout and the remaining wall-clock budget
+    const effectiveTimeoutMs = Math.min(config.requestTimeoutMs, Math.max(1000, remaining));
 
     // Circuit breaker: fast-fail if pool is completely exhausted
     if (attempt > 0 && await isPoolExhausted()) {
@@ -115,7 +142,7 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
 
     let result;
     try {
-      result = await generateContent(key, currentModel, prompt, options);
+      result = await generateContent(key, currentModel, prompt, options, effectiveTimeoutMs);
     } catch (err) {
       await returnKey(key);
 
@@ -147,6 +174,22 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
       return { error: err.message, code: 'UPSTREAM_ERROR', request_id: reqId, httpStatus: 502 };
     }
 
+    // Non-JSON upstream response: treat as a transient model-level error and switch model
+    if (result.parseError) {
+      await returnKey(key);
+      await recordFailure(currentModel, 'other');
+      logError({ type: 'parse_error', model: currentModel, key_masked: lastKeyMasked, message: 'Non-JSON upstream response' });
+      recordFailureRateTick().catch(() => {});
+      lastError = 'parse_error';
+      const parseRemaining = fallbackIndex === -1 ? fallbackModels : fallbackModels.slice(fallbackIndex + 1);
+      if (parseRemaining.length === 0) break;
+      currentModel = await getBestModel(parseRemaining);
+      if (!currentModel) break;
+      fallbackIndex = fallbackModels.indexOf(currentModel);
+      model429Count = 0;
+      continue;
+    }
+
     if (result.status === 200) {
       await returnKey(key);
       await recordSuccess(currentModel, result.latencyMs);
@@ -161,7 +204,7 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
         .filter(p => !p.thought && !p.inlineData)
         .map(p => p.text || '')
         .join('') || '';
-      
+
       const audioParts = parts.filter(p => p.inlineData?.mimeType?.startsWith('audio/'));
       const audioData = audioParts.length > 0 ? audioParts[0].inlineData.data : null;
       const audioMimeType = audioParts.length > 0 ? audioParts[0].inlineData.mimeType : null;
@@ -170,6 +213,14 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
 
       if (currentModel && currentModel.startsWith('gemma-4')) {
         responseText = responseText.replace(/(?:<\|channel>thought|<(?:think|thought)>)[\s\S]*?(?:<channel\|>|<\/(?:think|thought)>|$)/gi, '').trim();
+      }
+
+      // Detect empty response: provider returned 200 but no usable content
+      if (!responseText && !audioData && functionCalls.length === 0) {
+        logError({ type: 'empty_response', model: currentModel, key_masked: lastKeyMasked, message: 'Provider returned 200 with no usable content' });
+        logRequest({ request_id: reqId, model: currentModel, api_key_masked: lastKeyMasked, latency_ms: result.latencyMs, status: 'empty', retries, prompt_length: prompt?.length ?? 0, user_email: userEmail });
+        requestsTotal.inc({ model: currentModel, status: 'empty' });
+        return { error: 'Provider returned no content', code: 'EMPTY_RESPONSE', request_id: reqId, httpStatus: 502 };
       }
 
       // ── Hivemind: store prompt+response for future context retrieval ────
@@ -233,7 +284,7 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
     if ([500, 502, 503, 504, 400, 404].includes(result.status) || (result.status === 429 && model429Count >= 3)) {
       if (result.status !== 429) await returnKey(key);
       recordKeyFailure(lastKeyMasked).catch(() => {});
-      
+
       const type = String(result.status);
       await recordFailure(currentModel, result.status >= 500 ? '503' : 'other');
       logError({ type, model: currentModel, key_masked: lastKeyMasked });
@@ -267,8 +318,11 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
     return { error: result.data?.error?.message || 'Gemini API error', code: result.status, request_id: reqId, httpStatus: result.status };
   }
 
-  logRequest({ request_id: reqId, model: currentModel, api_key_masked: lastKeyMasked, latency_ms: 0, status: 'exhausted', retries, prompt_length: prompt?.length ?? 0, user_email: userEmail });
-  requestsTotal.inc({ model: currentModel ?? 'unknown', status: 'exhausted' });
+  logRequest({ request_id: reqId, model: currentModel, api_key_masked: lastKeyMasked, latency_ms: 0, status: deadlineExceeded ? 'deadline_exceeded' : 'exhausted', retries, prompt_length: prompt?.length ?? 0, user_email: userEmail });
+  requestsTotal.inc({ model: currentModel ?? 'unknown', status: deadlineExceeded ? 'deadline_exceeded' : 'exhausted' });
+  if (deadlineExceeded) {
+    return { error: 'Request deadline exceeded', lastError, code: 'DEADLINE_EXCEEDED', request_id: reqId, httpStatus: 503 };
+  }
   return { error: 'All retries exhausted', lastError, code: 'RETRIES_EXHAUSTED', request_id: reqId, httpStatus: 503 };
 }
 
@@ -278,14 +332,23 @@ export async function runGenerate({ prompt, model, options = {}, requestId, user
 export async function runEmbed({ text, model, requestId, userEmail } = {}) {
   const reqId = requestId ?? randomUUID();
   const currentModel = model ?? 'gemini-embedding-2-preview';
-  
+  const deadline = Date.now() + config.maxRetryWallMs;
+
   let lastError = null;
   let retries = 0;
   let lastKeyMasked = null;
   let model429Count = 0;
+  let deadlineExceeded = false;
 
   for (let attempt = 0; attempt < config.maxRetries; attempt++) {
     if (attempt > 0) retries++;
+
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      deadlineExceeded = true;
+      break;
+    }
+    const effectiveTimeoutMs = Math.min(config.requestTimeoutMs, Math.max(1000, remaining));
 
     // Circuit breaker: fast-fail if pool is completely exhausted
     if (attempt > 0 && await isPoolExhausted()) {
@@ -305,9 +368,9 @@ export async function runEmbed({ text, model, requestId, userEmail } = {}) {
     let result;
     try {
       if (Array.isArray(text)) {
-        result = await batchEmbedContents(key, currentModel, text);
+        result = await batchEmbedContents(key, currentModel, text, effectiveTimeoutMs);
       } else {
-        result = await embedContent(key, currentModel, text);
+        result = await embedContent(key, currentModel, text, effectiveTimeoutMs);
       }
     } catch (err) {
       await returnKey(key);
@@ -323,6 +386,15 @@ export async function runEmbed({ text, model, requestId, userEmail } = {}) {
       logError({ type: 'other', model: currentModel, key_masked: lastKeyMasked, message: err.message });
       recordFailureRateTick().catch(() => {});
       return { error: err.message, code: 'UPSTREAM_ERROR', request_id: reqId, httpStatus: 502 };
+    }
+
+    if (result.parseError) {
+      await returnKey(key);
+      await recordFailure(currentModel, 'other');
+      logError({ type: 'parse_error', model: currentModel, key_masked: lastKeyMasked, message: 'Non-JSON upstream response' });
+      recordFailureRateTick().catch(() => {});
+      lastError = 'parse_error';
+      continue; // Retry with another key
     }
 
     if (result.status === 200) {
@@ -378,7 +450,10 @@ export async function runEmbed({ text, model, requestId, userEmail } = {}) {
     return { error: result.data?.error?.message || 'Gemini API error', code: result.status, request_id: reqId, httpStatus: result.status };
   }
 
-  logRequest({ request_id: reqId, model: currentModel, api_key_masked: lastKeyMasked, latency_ms: 0, status: 'exhausted', retries, user_email: userEmail });
+  logRequest({ request_id: reqId, model: currentModel, api_key_masked: lastKeyMasked, latency_ms: 0, status: deadlineExceeded ? 'deadline_exceeded' : 'exhausted', retries, user_email: userEmail });
+  if (deadlineExceeded) {
+    return { error: 'Request deadline exceeded', lastError, code: 'DEADLINE_EXCEEDED', request_id: reqId, httpStatus: 503 };
+  }
   return { error: 'All retries exhausted', lastError, code: 'RETRIES_EXHAUSTED', request_id: reqId, httpStatus: 503 };
 }
 
@@ -389,6 +464,7 @@ export async function runEmbed({ text, model, requestId, userEmail } = {}) {
 export async function runImageGeneration({ prompt, options = {}, requestId, userEmail } = {}) {
   const reqId = requestId ?? randomUUID();
   const wallStart = Date.now();
+  const deadline = Date.now() + config.maxRetryWallMs;
 
   const imageModels = await getImageModels();
   if (!imageModels || imageModels.length === 0) {
@@ -401,9 +477,17 @@ export async function runImageGeneration({ prompt, options = {}, requestId, user
   let retries = 0;
   let lastError = null;
   let model429Count = 0;
+  let deadlineExceeded = false;
 
   for (let attempt = 0; attempt < config.maxRetries; attempt++) {
     if (attempt > 0) retries++;
+
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      deadlineExceeded = true;
+      break;
+    }
+    const effectiveTimeoutMs = Math.min(config.requestTimeoutMs, Math.max(1000, remaining));
 
     const key = await getKey();
     if (!key) {
@@ -414,7 +498,7 @@ export async function runImageGeneration({ prompt, options = {}, requestId, user
 
     let result;
     try {
-      result = await generateImage(key, currentModel, prompt, options);
+      result = await generateImage(key, currentModel, prompt, options, effectiveTimeoutMs);
     } catch (err) {
       await returnKey(key);
       if (err.code === 'TIMEOUT') {
@@ -429,6 +513,18 @@ export async function runImageGeneration({ prompt, options = {}, requestId, user
         continue;
       }
       return { error: err.message, code: 'UPSTREAM_ERROR', request_id: reqId, httpStatus: 502 };
+    }
+
+    if (result.parseError) {
+      await returnKey(key);
+      await recordFailure(currentModel, 'other');
+      logError({ type: 'parse_error', model: currentModel, key_masked: lastKeyMasked, message: 'Non-JSON upstream response' });
+      lastError = 'parse_error';
+      modelIndex++;
+      currentModel = imageModels[modelIndex] ?? null;
+      if (!currentModel) break;
+      model429Count = 0;
+      continue;
     }
 
     if (result.status === 200) {
@@ -492,6 +588,9 @@ export async function runImageGeneration({ prompt, options = {}, requestId, user
     return { error: errMsg, code: String(result.status), request_id: reqId, httpStatus: result.status };
   }
 
+  if (deadlineExceeded) {
+    return { error: 'Request deadline exceeded', lastError, code: 'DEADLINE_EXCEEDED', request_id: reqId, httpStatus: 503 };
+  }
   return { error: 'All retries exhausted', lastError, code: 'RETRIES_EXHAUSTED', request_id: reqId, httpStatus: 503 };
 }
 

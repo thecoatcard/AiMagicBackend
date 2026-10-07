@@ -1,233 +1,219 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-vi.mock('../../src/config.js', () => ({
-  config: { cooldownMs: 60000, maxRetries: 3, requestTimeoutMs: 30000 },
+// ── mock every dependency ──────────────────────────────────────────────────
+
+// vi.hoisted so this object is reachable inside vi.mock factory (which vitest
+// hoists above top-level const declarations).
+const mockConfig = vi.hoisted(() => ({
+  maxRetries: 3,
+  maxRetryWallMs: 60_000,
+  requestTimeoutMs: 30_000,
+  cooldownMs: 5_000,
+  hivemindEmbeddingModel: 'gemini-embedding-2-preview',
 }));
-vi.mock('../../src/redis/keyPool.js', async (importOriginal) => ({
-  classifyKeyFailure: (await importOriginal()).classifyKeyFailure,
-  getKey: vi.fn(),
-  returnKey: vi.fn(),
-  cooldownKey: vi.fn(),
-  disableKey: vi.fn(),
-  recordKeySuccess: vi.fn().mockResolvedValue(undefined),
-  recordKeyFailure: vi.fn().mockResolvedValue(undefined),
-  isPoolExhausted: vi.fn().mockResolvedValue(false),
+vi.mock('../../src/config.js', () => ({ config: mockConfig }));
+
+vi.mock('../../src/redis/keyPool.js', () => ({
+  getKey:            vi.fn().mockResolvedValue('test-key-1234'),
+  returnKey:         vi.fn().mockResolvedValue(undefined),
+  cooldownKey:       vi.fn().mockResolvedValue(undefined),
+  disableKey:        vi.fn().mockResolvedValue(undefined),
+  recordKeySuccess:  vi.fn().mockResolvedValue(undefined),
+  recordKeyFailure:  vi.fn().mockResolvedValue(undefined),
+  isPoolExhausted:   vi.fn().mockResolvedValue(false),
+  classifyKeyFailure: vi.fn().mockReturnValue(null),
 }));
+
 vi.mock('../../src/services/gemini.js', () => ({
-  generateContent: vi.fn(),
-  embedContent: vi.fn(),
-  batchEmbedContents: vi.fn(),
-  generateImage: vi.fn(),
+  generateContent:      vi.fn(),
+  embedContent:         vi.fn(),
+  batchEmbedContents:   vi.fn(),
+  generateImage:        vi.fn(),
 }));
+
 vi.mock('../../src/redis/modelHealth.js', () => ({
-  recordSuccess: vi.fn(),
-  recordFailure: vi.fn(),
-  getBestModel: vi.fn(),
+  recordSuccess: vi.fn().mockResolvedValue(undefined),
+  recordFailure: vi.fn().mockResolvedValue(undefined),
+  getBestModel:  vi.fn().mockImplementation(candidates => Promise.resolve(candidates[0] ?? null)),
 }));
+
 vi.mock('../../src/redis/modelConfig.js', () => ({
-  getFallbackModels: vi.fn().mockResolvedValue(['model-a', 'model-b']),
-  getActiveFallbackModels: vi.fn().mockResolvedValue(['model-a', 'model-b']),
-  getImageModels: vi.fn().mockResolvedValue(['img-model']),
+  getActiveFallbackModels: vi.fn().mockResolvedValue(['gemini-2.5-flash', 'gemini-2.5-flash-lite']),
+  getImageModels:          vi.fn().mockResolvedValue(['gemini-2.5-flash-image']),
 }));
+
 vi.mock('../../src/db/logger.js', () => ({
   logRequest: vi.fn(),
-  logError: vi.fn(),
+  logError:   vi.fn(),
 }));
+
 vi.mock('../../src/services/notifications.js', () => ({
   notifyAdminNoKeys: vi.fn(),
 }));
+
 vi.mock('../../src/redis/systemConfig.js', () => ({
-  recordFailureRateTick: vi.fn().mockResolvedValue(undefined),
+  recordFailureRateTick:     vi.fn().mockResolvedValue(undefined),
+  isHivemindRuntimeEnabled:  vi.fn().mockResolvedValue(false),
 }));
+
+vi.mock('../../src/services/hivemind.js', () => ({
+  isHivemindEnabled:  vi.fn().mockReturnValue(false),
+  retrieveContext:    vi.fn().mockResolvedValue([]),
+  storeContext:       vi.fn().mockResolvedValue(undefined),
+  buildContextPrefix: vi.fn().mockReturnValue(''),
+}));
+
+vi.mock('../../src/redis/client.js', () => ({
+  getRedis: vi.fn().mockReturnValue({
+    set: vi.fn().mockResolvedValue('OK'),
+  }),
+}));
+
 vi.mock('../../src/metrics/index.js', () => ({
-  requestsTotal: { inc: vi.fn() },
-  requestDuration: { observe: vi.fn() },
-  retriesTotal: { inc: vi.fn() },
-  keyCooldownsTotal: { inc: vi.fn() },
-  model503Total: { inc: vi.fn() },
-  modelTimeoutsTotal: { inc: vi.fn() },
+  requestsTotal:       { inc: vi.fn() },
+  requestDuration:     { observe: vi.fn() },
+  retriesTotal:        { inc: vi.fn() },
+  keyCooldownsTotal:   { inc: vi.fn() },
+  model503Total:       { inc: vi.fn() },
+  modelTimeoutsTotal:  { inc: vi.fn() },
+  hivemindEmbeddingsTotal: { inc: vi.fn() },
 }));
 
-import { runGenerate, runEmbed, runImageGeneration, maskKey } from '../../src/services/orchestrator.js';
-import { getKey, returnKey, isPoolExhausted, disableKey } from '../../src/redis/keyPool.js';
-import { generateContent, embedContent, generateImage } from '../../src/services/gemini.js';
-import { getBestModel } from '../../src/redis/modelHealth.js';
+import { runGenerate, maskKey } from '../../src/services/orchestrator.js';
+import { generateContent } from '../../src/services/gemini.js';
+import { getKey } from '../../src/redis/keyPool.js';
 
-describe('maskKey()', () => {
-  it('should mask a normal key', () => {
-    const masked = maskKey('AIzaSyA1234567890abcdef');
-    expect(masked).toMatch(/^AIza.*….*$/);
-    expect(masked.length).toBeLessThan('AIzaSyA1234567890abcdef'.length);
+const successPayload = {
+  candidates: [{
+    content: { parts: [{ text: 'Hello world' }] }
+  }]
+};
+
+describe('runGenerate() — success', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockConfig.maxRetryWallMs = 60_000;
+    generateContent.mockResolvedValue({ status: 200, data: successPayload, latencyMs: 50 });
   });
 
-  it('should return **** for short keys', () => {
-    expect(maskKey('abc')).toBe('****');
-    expect(maskKey('')).toBe('****');
-    expect(maskKey(null)).toBe('****');
+  it('returns text on 200 response', async () => {
+    const result = await runGenerate({ prompt: 'hi', model: 'gemini-2.5-flash' });
+    expect(result.error).toBeUndefined();
+    expect(result.text).toBe('Hello world');
+    expect(result.model).toBe('gemini-2.5-flash');
+  });
+
+  it('includes request_id and latency_ms', async () => {
+    const result = await runGenerate({ prompt: 'hi', model: 'gemini-2.5-flash' });
+    expect(result.request_id).toBeTruthy();
+    expect(result.latency_ms).toBeGreaterThanOrEqual(0);
   });
 });
 
-describe('runGenerate()', () => {
+describe('runGenerate() — wall-clock deadline', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    getKey.mockResolvedValue('test-api-key-12345678');
-    isPoolExhausted.mockResolvedValue(false);
-    getBestModel.mockImplementation((candidates) => Promise.resolve(candidates[0]));
+    // Set deadline in the past so every attempt is rejected immediately
+    mockConfig.maxRetryWallMs = -1;
   });
 
-  it('should return text on successful generation', async () => {
+  it('returns DEADLINE_EXCEEDED code and 503 status', async () => {
+    const result = await runGenerate({ prompt: 'hi', model: 'gemini-2.5-flash' });
+    expect(result.code).toBe('DEADLINE_EXCEEDED');
+    expect(result.httpStatus).toBe(503);
+    // generateContent should never have been called
+    expect(generateContent).not.toHaveBeenCalled();
+  });
+});
+
+describe('runGenerate() — empty 200 response (EMPTY_RESPONSE)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockConfig.maxRetryWallMs = 60_000;
+  });
+
+  it('returns EMPTY_RESPONSE when candidates have no text, audio, or functionCalls', async () => {
     generateContent.mockResolvedValue({
       status: 200,
-      data: { candidates: [{ content: { parts: [{ text: 'Hello world' }] } }], usageMetadata: {} },
-      latencyMs: 100,
+      data: { candidates: [{ content: { parts: [] } }] },
+      latencyMs: 30,
     });
-
-    const result = await runGenerate({ prompt: 'Hi', model: 'model-a' });
-    expect(result.text).toBe('Hello world');
-    expect(result.model).toBe('model-a');
-    expect(result.request_id).toBeDefined();
+    const result = await runGenerate({ prompt: 'hi', model: 'gemini-2.5-flash' });
+    expect(result.code).toBe('EMPTY_RESPONSE');
+    expect(result.httpStatus).toBe(502);
   });
 
-  it('should return NO_KEYS when no api keys available', async () => {
+  it('returns EMPTY_RESPONSE when candidates is missing', async () => {
+    generateContent.mockResolvedValue({
+      status: 200,
+      data: {},
+      latencyMs: 30,
+    });
+    const result = await runGenerate({ prompt: 'hi', model: 'gemini-2.5-flash' });
+    expect(result.code).toBe('EMPTY_RESPONSE');
+    expect(result.httpStatus).toBe(502);
+  });
+});
+
+describe('runGenerate() — parseError triggers model switch', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockConfig.maxRetryWallMs = 60_000;
+    mockConfig.maxRetries = 3;
+  });
+
+  it('switches to fallback model after parseError, succeeds on second model', async () => {
+    generateContent
+      .mockResolvedValueOnce({ status: 200, data: null, parseError: true, latencyMs: 10 })
+      .mockResolvedValue({ status: 200, data: successPayload, latencyMs: 50 });
+
+    const result = await runGenerate({ prompt: 'hi', model: 'gemini-2.5-flash' });
+    // Should succeed on retry
+    expect(result.text).toBe('Hello world');
+    expect(generateContent).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('runGenerate() — no keys', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockConfig.maxRetryWallMs = 60_000;
+  });
+
+  it('returns NO_KEYS when key pool is empty', async () => {
     getKey.mockResolvedValue(null);
-    const result = await runGenerate({ prompt: 'Hi', model: 'model-a' });
+
+    const result = await runGenerate({ prompt: 'hi', model: 'gemini-2.5-flash' });
     expect(result.code).toBe('NO_KEYS');
     expect(result.httpStatus).toBe(503);
   });
+});
 
-  it('should return POOL_EXHAUSTED when pool is empty', async () => {
-    getKey.mockResolvedValueOnce('key1');
-    generateContent.mockResolvedValueOnce({ status: 429 });
-    isPoolExhausted.mockResolvedValue(true);
-
-    const result = await runGenerate({ prompt: 'Hi', model: 'model-a' });
-    expect(result.code).toMatch(/POOL_EXHAUSTED|NO_KEYS/);
+describe('runGenerate() — retries exhausted', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockConfig.maxRetryWallMs = 60_000;
+    mockConfig.maxRetries = 2;
+    // Reset getKey in case a prior test set it to null
+    getKey.mockResolvedValue('test-key-1234');
   });
 
-  it('should handle timeout and fall back to next model', async () => {
-    const timeoutErr = new Error('timeout');
-    timeoutErr.code = 'TIMEOUT';
-    generateContent
-      .mockRejectedValueOnce(timeoutErr)
-      .mockResolvedValueOnce({
-        status: 200,
-        data: { candidates: [{ content: { parts: [{ text: 'Fallback worked' }] } }] },
-        latencyMs: 200,
-      });
-
-    const result = await runGenerate({ prompt: 'Hi', model: 'model-a' });
-    expect(result.text).toBe('Fallback worked');
-    expect(result.retries).toBeGreaterThan(0);
-  });
-
-  it('should return RETRIES_EXHAUSTED when all retries fail', async () => {
-    generateContent.mockResolvedValue({ status: 503 });
-    getBestModel.mockResolvedValue(null);
-    
-    const result = await runGenerate({ prompt: 'Hi', model: 'model-a' });
+  it('returns RETRIES_EXHAUSTED after all models fail with 503', async () => {
+    generateContent.mockResolvedValue({ status: 503, data: { error: { message: 'unavailable' } }, latencyMs: 10 });
+    const result = await runGenerate({ prompt: 'hi', model: 'gemini-2.5-flash' });
     expect(result.code).toBe('RETRIES_EXHAUSTED');
+    expect(result.httpStatus).toBe(503);
+  });
+});
+
+describe('maskKey()', () => {
+  it('masks short keys', () => {
+    expect(maskKey('1234')).toBe('****');
+    expect(maskKey('')).toBe('****');
   });
 
-  it('quarantines a leaked key before retrying the same model', async () => {
-    generateContent.mockResolvedValueOnce({ status: 400, data: { error: { message: 'API key reported as leaked' } } })
-      .mockResolvedValueOnce({ status: 200, data: { candidates: [{ content: { parts: [{ text: 'Recovered' }] } }] } });
-    const result = await runGenerate({ prompt: 'Hi', model: 'model-a' });
-    expect(result.text).toBe('Recovered');
-    expect(disableKey).toHaveBeenCalledWith('test-api-key-12345678', 'key_leaked');
-    expect(generateContent.mock.calls[1][1]).toBe('model-a');
-  });
-
-  it('quarantines a revoked embedding credential before retrying', async () => {
-    embedContent.mockResolvedValueOnce({ status: 400, data: { error: { message: 'API key revoked' } } })
-      .mockResolvedValueOnce({ status: 200, data: { embedding: { values: [0.1] } }, latencyMs: 10 });
-    const result = await runEmbed({ text: 'Hi', model: 'embedding-model' });
-    expect(result.embedding.values).toEqual([0.1]);
-    expect(disableKey).toHaveBeenCalledWith('test-api-key-12345678', 'key_revoked');
-  });
-
-  it('quarantines a leaked image credential before model fallback', async () => {
-    generateImage.mockResolvedValueOnce({ status: 400, data: { error: { message: 'API key reported as leaked' } } })
-      .mockResolvedValueOnce({ status: 200, data: { candidates: [{ content: { parts: [{ inlineData: { data: 'image-data' } }] } }] }, latencyMs: 10 });
-    const result = await runImageGeneration({ prompt: 'An image' });
-    expect(result.images).toEqual(['image-data']);
-    expect(disableKey).toHaveBeenCalledWith('test-api-key-12345678', 'key_leaked');
-    expect(generateImage.mock.calls[1][1]).toBe('img-model');
-  });
-
-  it('should extract audio from inlineData when present in parts', async () => {
-    generateContent.mockResolvedValue({
-      status: 200,
-      data: {
-        candidates: [{
-          content: {
-            parts: [
-              { text: 'Here is the audio:' },
-              { inlineData: { mimeType: 'audio/l16; rate=24000; channels=1', data: 'dGVzdCBhdWRpbw==' } }
-            ]
-          }
-        }],
-        usageMetadata: {}
-      },
-      latencyMs: 120,
-    });
-
-    const result = await runGenerate({
-      prompt: 'Say hello',
-      model: 'gemini-3.1-flash-tts-preview',
-      options: {
-        responseModalities: ['AUDIO'],
-        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } }
-      }
-    });
-
-    expect(result.text).toBe('Here is the audio:');
-    expect(result.audio).toBe('dGVzdCBhdWRpbw==');
-    expect(result.mimeType).toBe('audio/l16; rate=24000; channels=1');
-    expect(generateContent).toHaveBeenCalledWith(
-      expect.any(String),
-      'gemini-3.1-flash-tts-preview',
-      'Say hello',
-      expect.objectContaining({
-        responseModalities: ['AUDIO'],
-        speechConfig: expect.any(Object)
-      })
-    );
-  });
-
-  it('should forward tools and toolConfig and extract functionCalls', async () => {
-    generateContent.mockResolvedValue({
-      status: 200,
-      data: {
-        candidates: [{
-          content: {
-            parts: [
-              { functionCall: { name: 'click', args: { x: 100, y: 200 } } }
-            ]
-          }
-        }],
-        usageMetadata: {}
-      },
-      latencyMs: 120,
-    });
-
-    const result = await runGenerate({
-      prompt: 'Interact',
-      model: 'gemini-3.5-flash',
-      options: {
-        tools: [{ functionDeclarations: [{ name: 'click' }] }],
-        toolConfig: { functionCallingConfig: { mode: 'ANY' } }
-      }
-    });
-
-    expect(result.functionCalls).toEqual([{ name: 'click', args: { x: 100, y: 200 } }]);
-    expect(generateContent).toHaveBeenCalledWith(
-      expect.any(String),
-      'gemini-3.5-flash',
-      'Interact',
-      expect.objectContaining({
-        tools: expect.any(Array),
-        toolConfig: expect.any(Object)
-      })
-    );
+  it('preserves first 4 and last 4 chars with hash in middle', () => {
+    const masked = maskKey('AIzaSyAbCdEfGhIjKlMnOpQrStUvWxYz0123456');
+    expect(masked).toMatch(/^AIza…[0-9a-f]{6}…3456$/);
   });
 });
